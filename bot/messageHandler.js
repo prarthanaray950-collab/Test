@@ -25,11 +25,19 @@ const cleanReply = (text) =>
 const cleanPhone = (jid) =>
   jid.replace("@s.whatsapp.net", "").replace(/^91/, "").replace(/\D/g, "").slice(-10);
 
-const handleMessage = async (sock, phoneNumber, userText) => {
+const handleMessage = async (sock, phoneNumber, userText, pushName = "") => {
   console.log(`[IN]  ${phoneNumber}: ${userText.slice(0, 80)}`);
 
   try {
     const { history, profile } = await ctx.getHistoryAndProfile(phoneNumber);
+
+    // Auto-save WhatsApp display name if profile has no name yet (Bug fix: pushName)
+    if (pushName && !profile.name) {
+      await ctx.updateProfile(phoneNumber, { name: pushName });
+      profile.name = pushName;
+      console.log(`[PROFILE] Auto-saved pushName: ${pushName}`);
+    }
+
     await ctx.appendMessage(phoneNumber, "user", userText);
 
     const aiReply = await chat(userText, history, profile);
@@ -68,17 +76,19 @@ const handleMessage = async (sock, phoneNumber, userText) => {
     // ── REGISTER USER ──────────────────────────────────────────────────────────
     const regBlock = extractBlock(aiReply, "REGISTER_USER");
     if (regBlock) {
-      const name  = regBlock.get("Name")  || profile.name || "Customer";
+      const name  = regBlock.get("Name")  || profile.name  || "Customer";
       const phone = regBlock.get("Phone") || cleanPhone(phoneNumber);
+      const email = regBlock.get("Email") || profile.email || "";
 
       try {
-        const result = await api.findOrCreateUser({ name, phone, email: profile.email || "", source: "whatsapp_bot" });
+        const result = await api.findOrCreateUser({ name, phone, email, source: "whatsapp_bot" });
         const userId = result?.user?._id || result?._id;
-        if (userId) await ctx.updateProfile(phoneNumber, { name, linkedUserId: String(userId) });
-        console.log(`[USER] ✅ ${name} (${phone})`);
+        if (userId) await ctx.updateProfile(phoneNumber, { name, email, linkedUserId: String(userId) });
+        else        await ctx.updateProfile(phoneNumber, { name, email });
+        console.log(`[USER] ✅ ${name} (${phone}) ${email}`);
       } catch (e) {
         console.warn(`[USER] ⚠️ ${e.message}`);
-        await ctx.updateProfile(phoneNumber, { name });
+        await ctx.updateProfile(phoneNumber, { name, email });
       }
 
       await admin.notifyNewUser({ phoneNumber, name, phone });
@@ -131,7 +141,8 @@ const handleMessage = async (sock, phoneNumber, userText) => {
       console.log(`[HEALTH] ✅`);
     }
 
-    if (!orderDone) await ctx.appendMessage(phoneNumber, "assistant", aiReply);
+    // Store cleaned reply (no [BLOCK] tags) so history doesn't confuse the AI on next turn
+    if (!orderDone) await ctx.appendMessage(phoneNumber, "assistant", cleanReply(aiReply));
 
     const reply = cleanReply(aiReply);
     if (reply) {
