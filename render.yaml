@@ -19,7 +19,7 @@ services:
       - key: OPENROUTER_MODEL
         value: meta-llama/llama-3.3-8b-instruct:free
       - key: WEBSITE_API_URL
-        value: https://satvikmeals.com
+        value: https://satvikmeals.in
       - key: BOT_SECRET
         sync: false
       - key: ADMIN_WHATSAPP
