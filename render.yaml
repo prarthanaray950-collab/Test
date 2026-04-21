@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: satvikmeals-bot
+    env: node
+    region: singapore
+    plan: free
+    buildCommand: npm install
+    startCommand: node index.js
+
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "3000"
+      - key: MONGODB_URI
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENROUTER_MODEL
+        value: meta-llama/llama-3.3-8b-instruct:free
+      - key: WEBSITE_API_URL
+        value: https://satvikmeals.com
+      - key: BOT_SECRET
+        sync: false
+      - key: ADMIN_WHATSAPP
+        sync: false
