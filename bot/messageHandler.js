@@ -1,3 +1,16 @@
+/**
+ * messageHandler.js
+ * 
+ * Core message processing pipeline. For every incoming WhatsApp message:
+ * 1. Normalize the phone number to a clean 10-digit format
+ * 2. Load full conversation history + profile from MongoDB (persists across restarts)
+ * 3. Save push name only if no real name is known yet
+ * 4. Send full history + profile to AI so it has complete context
+ * 5. Parse any structured action blocks ([REGISTER_USER], [SUBSCRIPTION_INTEREST] etc.)
+ * 6. Save the user message AND assistant reply together (prevents desync on crash)
+ * 7. Send reply to customer
+ */
+
 const { chat }  = require("./openrouter");
 const ctx       = require("./contextManager");
 const api       = require("./websiteApi");
@@ -22,26 +35,38 @@ const cleanReply = (text) =>
     .replace(/\[HEALTH_NOTE\][\s\S]*?\[\/HEALTH_NOTE\]/g, "")
     .trim();
 
-const cleanPhone = (jid) =>
-  jid.replace("@s.whatsapp.net", "").replace(/^91/, "").replace(/\D/g, "").slice(-10);
-
-const handleMessage = async (sock, phoneNumber, userText, pushName = "") => {
-  console.log(`[IN]  ${phoneNumber}: ${userText.slice(0, 80)}`);
+const handleMessage = async (sock, rawJid, userText, pushName = "") => {
+  // Always normalize to clean 10-digit number for consistent DB keying
+  const phoneNumber = ctx.normalizePhone(rawJid);
+  console.log(`[IN]  ${phoneNumber} (${rawJid}): ${userText.slice(0, 80)}`);
 
   try {
+    // ── STEP 1: Load full history + profile from MongoDB ──────────────────────
+    // This is what makes the bot remember everything across restarts.
+    // Every message ever sent by this customer is stored in MongoDB under
+    // their phone number and retrieved fresh on every new message.
     const { history, profile } = await ctx.getHistoryAndProfile(phoneNumber);
 
-    // Auto-save WhatsApp display name if profile has no name yet (Bug fix: pushName)
+    // ── STEP 2: Save WhatsApp display name only if no real name exists yet ────
+    // We do NOT overwrite a name the customer already told us — only use the
+    // WhatsApp display name as a fallback for brand new customers.
     if (pushName && !profile.name) {
-      await ctx.updateProfile(phoneNumber, { name: pushName });
+      await ctx.savePushNameIfNew(phoneNumber, pushName);
       profile.name = pushName;
-      console.log(`[PROFILE] Auto-saved pushName: ${pushName}`);
     }
 
-    await ctx.appendMessage(phoneNumber, "user", userText);
-
+    // ── STEP 3: Get AI reply — full history + profile sent every time ─────────
+    // The AI receives the complete conversation history so it never forgets
+    // what was discussed earlier in the session.
     const aiReply = await chat(userText, history, profile);
-    console.log(`[AI]  ${aiReply.slice(0, 80)}`);
+    console.log(`[AI]  ${phoneNumber}: ${aiReply.slice(0, 80)}`);
+
+    // ── STEP 4: Save user message + assistant reply together in one write ──────
+    // Saving both together prevents the desync bug: if the bot crashes after
+    // saving the user message but before saving the reply, the AI would see
+    // an orphaned user message with no reply on the next turn — confusing it.
+    const cleanedReply = cleanReply(aiReply);
+    await ctx.appendExchange(phoneNumber, userText, cleanedReply);
 
     let orderDone = false;
 
@@ -55,7 +80,7 @@ const handleMessage = async (sock, phoneNumber, userText, pushName = "") => {
 
       try {
         await api.createOrder({
-          phoneNumber:  phoneNumber.replace("@s.whatsapp.net", ""),
+          phoneNumber,
           customerName, address,
           items:       [{ name: item, quantity: 1, price: amount }],
           totalAmount:  amount,
@@ -69,7 +94,8 @@ const handleMessage = async (sock, phoneNumber, userText, pushName = "") => {
       await ctx.updateProfile(phoneNumber, { name: customerName, address });
       await ctx.recordOrder(phoneNumber);
       await admin.notifyNewOrder({ phoneNumber, customerName, address, item, amount });
-      await ctx.clearHistory(phoneNumber);
+      // Trim (not wipe) history after order — profile stays fully intact
+      await ctx.trimHistoryAfterOrder(phoneNumber);
       orderDone = true;
     }
 
@@ -77,7 +103,7 @@ const handleMessage = async (sock, phoneNumber, userText, pushName = "") => {
     const regBlock = extractBlock(aiReply, "REGISTER_USER");
     if (regBlock) {
       const name  = regBlock.get("Name")  || profile.name  || "Customer";
-      const phone = regBlock.get("Phone") || cleanPhone(phoneNumber);
+      const phone = regBlock.get("Phone") || phoneNumber;
       const email = regBlock.get("Email") || profile.email || "";
 
       try {
@@ -102,7 +128,7 @@ const handleMessage = async (sock, phoneNumber, userText, pushName = "") => {
       const address      = subBlock.get("Address") || profile.address || "";
 
       try {
-        await api.createSubscriptionLead({ phoneNumber: phoneNumber.replace("@s.whatsapp.net", ""), customerName, planName, address, source: "whatsapp_bot" });
+        await api.createSubscriptionLead({ phoneNumber, customerName, planName, address, source: "whatsapp_bot" });
         console.log(`[SUB] ✅ ${planName}`);
       } catch (e) {
         console.warn(`[SUB] ⚠️ ${e.message}`);
@@ -123,7 +149,7 @@ const handleMessage = async (sock, phoneNumber, userText, pushName = "") => {
       const issue = compBlock.get("Issue") || compBlock.raw;
 
       try {
-        await api.submitComplaint({ phoneNumber: phoneNumber.replace("@s.whatsapp.net", ""), name: profile.name || "Unknown", type, issue, source: "whatsapp_bot" });
+        await api.submitComplaint({ phoneNumber, name: profile.name || "Unknown", type, issue, source: "whatsapp_bot" });
         console.log(`[COMPLAINT] ✅`);
       } catch (e) {
         console.warn(`[COMPLAINT] ⚠️ ${e.message}`);
@@ -141,19 +167,16 @@ const handleMessage = async (sock, phoneNumber, userText, pushName = "") => {
       console.log(`[HEALTH] ✅`);
     }
 
-    // Store cleaned reply (no [BLOCK] tags) so history doesn't confuse the AI on next turn
-    if (!orderDone) await ctx.appendMessage(phoneNumber, "assistant", cleanReply(aiReply));
-
-    const reply = cleanReply(aiReply);
-    if (reply) {
-      await sock.sendMessage(phoneNumber, { text: reply });
-      console.log(`[OUT] ${reply.slice(0, 60)}`);
+    // ── SEND REPLY ─────────────────────────────────────────────────────────────
+    if (cleanedReply) {
+      await sock.sendMessage(rawJid, { text: cleanedReply });
+      console.log(`[OUT] ${phoneNumber}: ${cleanedReply.slice(0, 60)}`);
     }
 
   } catch (err) {
     console.error(`[ERR] ${phoneNumber}: ${err.message}`);
-    await sock.sendMessage(phoneNumber, {
-      text: "Kuch technical issue aa gaya 😔 Thodi der mein try karein ya call karein: 6201276506",
+    await sock.sendMessage(rawJid, {
+      text: "Kuch technical issue aa gaya hai 🙏 Thodi der mein dobara try karein, ya seedha call karein: 6201276506",
     });
   }
 };
