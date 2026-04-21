@@ -1,45 +1,41 @@
 const getSystemPrompt = require("./systemPrompt");
 
-const chat = async (userMessage, history = []) => {
+const chat = async (userMessage, history = [], profile = {}) => {
   const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey || apiKey.includes("xxxx")) {
-    throw new Error("OPENROUTER_API_KEY not set in environment variables");
+  if (!apiKey || apiKey.startsWith("sk-or-v1-xxx")) {
+    throw new Error("OPENROUTER_API_KEY not configured");
   }
 
-  const model = process.env.OPENROUTER_MODEL || "meta-llama/llama-3.3-8b-instruct:free";
-  const systemPrompt = await getSystemPrompt();
+  const model = process.env.OPENROUTER_MODEL || "meta-llama/llama-3.3-70b-instruct:free";
+  const systemPrompt = await getSystemPrompt(profile);
 
   const messages = [
     { role: "system", content: systemPrompt },
     ...history.map(m => ({ role: m.role, content: m.content })),
-    { role: "user", content: userMessage },
+    { role: "user",   content: userMessage },
   ];
 
-  console.log(`[OpenRouter] Calling model: ${model}`);
+  console.log(`[AI] model=${model} history=${history.length} hasProfile=${!!profile.name}`);
 
   const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
       "Authorization": `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": "https://satvikmeals.in",
-      "X-Title": "SatvikMeals WhatsApp Bot",
+      "Content-Type":  "application/json",
+      "HTTP-Referer":  "https://satvikmeals-4t7p.onrender.com",
+      "X-Title":       "SatvikMeals WhatsApp Bot",
     },
-    body: JSON.stringify({ model, messages, max_tokens: 500, temperature: 0.75 }),
+    body: JSON.stringify({ model, messages, max_tokens: 600, temperature: 0.72 }),
   });
 
-  const rawBody = await response.text();
-  console.log(`[OpenRouter] Status: ${response.status}`);
+  const raw = await response.text();
+  if (!response.ok) throw new Error(`OpenRouter ${response.status}: ${raw.slice(0, 200)}`);
 
-  if (!response.ok) {
-    throw new Error(`OpenRouter ${response.status}: ${rawBody.slice(0, 200)}`);
-  }
-
-  const data = JSON.parse(rawBody);
+  const data = JSON.parse(raw);
   const text = data.choices?.[0]?.message?.content?.trim();
-  if (!text) throw new Error(`Empty reply. Response: ${rawBody.slice(0, 200)}`);
+  if (!text) throw new Error(`Empty AI reply. Raw: ${raw.slice(0, 200)}`);
 
-  console.log(`[OpenRouter] ✅ Reply (${text.length} chars)`);
+  console.log(`[AI] Reply ${text.length} chars`);
   return text;
 };
 
