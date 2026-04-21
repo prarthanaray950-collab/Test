@@ -27,9 +27,16 @@ const handleMessage = async (sock, phoneNumber, userText) => {
   console.log(`[MSG IN] ${phoneNumber}: ${userText}`);
 
   try {
+    // Get history BEFORE appending current message
+    // so history = previous conversation only
     const history = await getHistory(phoneNumber);
+
+    // Now append user's current message to DB
     await appendMessage(phoneNumber, "user", userText);
 
+    // Call AI with history (previous turns) + current message separately
+    // This avoids the duplicate-message bug where userText appeared
+    // both in history AND as the final user message
     console.log("[Bot] Calling OpenRouter...");
     const aiReply = await chat(userText, history);
     console.log(`[Bot] Reply: ${aiReply.slice(0, 80)}`);
@@ -75,6 +82,7 @@ const handleMessage = async (sock, phoneNumber, userText) => {
       await admin.notifySubscriptionInterest({ phoneNumber, planName: subBlock.getValue("Plan") });
     }
 
+    // Save assistant reply to history (unless order cleared it)
     if (!orderDone) await appendMessage(phoneNumber, "assistant", aiReply);
 
     const reply = cleanReply(aiReply);
