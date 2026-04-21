@@ -9,7 +9,7 @@ const createUser = async ({ name, phone }) => {
     const data = await res.json();
     if (!res.ok) return { success: false, message: data.message };
     if (data.token && phone) {
-      await fetch(`${process.env.WEBSITE_API_URL || "https://satvikmeals.com"}/api/auth/save-phone`, {
+      await fetch(`${process.env.WEBSITE_API_URL || "https://satvikmeals.in"}/api/auth/save-phone`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${data.token}` },
         body: JSON.stringify({ phone }),
