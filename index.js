@@ -50,6 +50,25 @@ app.get("/", (_, res) => {
 app.get("/health", (_, res) => res.json({ status: "ok", botStatus, uptime: process.uptime(), time: new Date() }));
 app.get("/status", (_, res) => res.json({ botStatus }));
 
+app.get("/api/clear-session", async (_, res) => {
+  try {
+    const mongoose = require("mongoose");
+    const AuthModel = mongoose.models.BaileysAuth;
+    if (AuthModel) {
+      await AuthModel.deleteMany({});
+      currentQR = null;
+      botStatus  = "starting";
+      console.log("[Session] ✅ Session cleared from MongoDB. Restart to get a fresh QR.");
+      res.json({ ok: true, message: "Session cleared. Restart the service to get a new QR code." });
+    } else {
+      res.json({ ok: false, message: "AuthModel not ready yet." });
+    }
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`[Server] Running on port ${PORT}`));
 
@@ -75,7 +94,7 @@ const startBot = async () => {
       version,
       auth: state,
       // Silent logger — only errors show in Render logs
-      logger: pino({ level: "silent" }),
+      logger: pino({ level: "error" }),
       printQRInTerminal: false,
       browser: ["SatvikMeals Bot", "Chrome", "1.0.0"],
       connectTimeoutMs: 60_000,
