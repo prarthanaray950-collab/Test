@@ -1,7 +1,7 @@
 const createUser = async ({ name, phone }) => {
   try {
     const email = `${phone}@whatsapp.satvikmeals.com`;
-    const res = await fetch(`${process.env.WEBSITE_API_URL || "https://satvikmeals.com"}/api/auth/dev-login`, {
+    const res = await fetch(`${process.env.WEBSITE_API_URL || "https://satvikmeals.in"}/api/auth/dev-login`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-bot-secret": process.env.BOT_SECRET || "" },
       body: JSON.stringify({ name, email }),
