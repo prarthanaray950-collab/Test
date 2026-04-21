@@ -22,7 +22,7 @@ const chat = async (userMessage, history = []) => {
     headers: {
       "Authorization": `Bearer ${apiKey}`,
       "Content-Type": "application/json",
-      "HTTP-Referer": "https://satvikmeals.com",
+      "HTTP-Referer": "https://satvikmeals.in",
       "X-Title": "SatvikMeals WhatsApp Bot",
     },
     body: JSON.stringify({ model, messages, max_tokens: 500, temperature: 0.75 }),
