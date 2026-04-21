@@ -3,7 +3,7 @@ const CACHE_TTL = 15 * 60 * 1000; // 15 minutes
 let _menu = null, _menuAt = 0;
 let _plans = null, _plansAt = 0;
 
-const BASE = () => process.env.WEBSITE_API_URL || "https://satvikmeals.com";
+const BASE = () => process.env.WEBSITE_API_URL || "https://satvikmeals.in";
 
 const fetchJSON = async (path) => {
   const res = await fetch(`${BASE()}${path}`, { headers: { "Content-Type": "application/json" } });
