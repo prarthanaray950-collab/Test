@@ -1,4 +1,4 @@
-const BASE   = () => (process.env.WEBSITE_API_URL || "https://satvikmeals-4t7p.onrender.com").replace(/\/$/, "");
+const BASE   = () => (process.env.WEBSITE_API_URL || "https://satvikmeals.in").replace(/\/$/, "");
 const SECRET = () => process.env.BOT_SECRET || "";
 
 let _menuCache = null, _menuAt = 0;
