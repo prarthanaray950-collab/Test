@@ -22,10 +22,10 @@ const chat = async (userMessage, history = [], profile = {}) => {
     headers: {
       "Authorization": `Bearer ${apiKey}`,
       "Content-Type":  "application/json",
-      "HTTP-Referer":  "https://satvikmeals-4t7p.onrender.com",
+      "HTTP-Referer":  "https://satvikmeals.in",
       "X-Title":       "SatvikMeals WhatsApp Bot",
     },
-    body: JSON.stringify({ model, messages, max_tokens: 600, temperature: 0.72 }),
+    body: JSON.stringify({ model, messages, max_tokens: 600, temperature: 0.35 }),
   });
 
   const raw = await response.text();
