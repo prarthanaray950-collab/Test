@@ -165,7 +165,8 @@ const startBot = async () => {
 
         if (!text.trim()) continue;
 
-        handleMessage(sock, jid, text.trim()).catch((e) =>
+        const pushName = msg.pushName || "";
+        handleMessage(sock, jid, text.trim(), pushName).catch((e) =>
           console.error(`[MsgErr] ${jid}: ${e.message}`)
         );
       }
