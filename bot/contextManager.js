@@ -1,45 +1,43 @@
 /**
  * contextManager.js
- * 
- * Handles all conversation storage and retrieval per phone number.
- * Every customer gets their own isolated record in MongoDB, keyed by
- * their clean 10-digit phone number. All data — history, profile,
- * orders — persists across bot restarts because it lives in MongoDB,
- * not in memory.
- * 
- * Key design decisions:
- * - Phone numbers are ALWAYS normalized to 10 digits before any DB operation
- * - Profile (name, email, address etc.) is NEVER cleared — only history can be trimmed
- * - Messages are saved in pairs (user + assistant together) to prevent desync if bot crashes mid-reply
- * - History limit is 100 messages (50 full exchanges) — enough for full context
- * - pushName (WhatsApp display name) is ONLY saved if customer has never told the bot their real name
+ *
+ * Handles all conversation storage per phone number in MongoDB.
+ * Every customer gets their own isolated document keyed by their
+ * clean 10-digit phone number. Everything persists across restarts.
  */
 
 const Conversation = require("../db/models/Conversation");
 
-// 100 messages = 50 full back-and-forth turns — comprehensive memory per session
 const HISTORY_LIMIT = 100;
 
-/**
- * Normalize any phone number format to clean 10-digit Indian number.
- * Handles: 919876543210@s.whatsapp.net, 919876543210, 9876543210, +919876543210
- */
+// ── Phone normalization ───────────────────────────────────────────────────────
+// Handles all formats: 919876543210@s.whatsapp.net, +919876543210, 9876543210
 const normalizePhone = (raw) => {
   const digits = String(raw)
     .replace("@s.whatsapp.net", "")
     .replace(/\D/g, "");
-  // Strip leading country code 91 if present and result would be 12 digits
   if (digits.length === 12 && digits.startsWith("91")) return digits.slice(2);
   if (digits.length === 11 && digits.startsWith("0"))  return digits.slice(1);
-  return digits.slice(-10); // always return last 10 digits
+  return digits.slice(-10);
 };
 
-/**
- * Load conversation history and profile for a given phone number.
- * Returns empty defaults if this is a brand new customer.
- * History is trimmed to the most recent HISTORY_LIMIT messages so the
- * AI always has the latest context without exceeding token limits.
- */
+// ── Duplicate message guard ───────────────────────────────────────────────────
+// Prevents double replies when WhatsApp delivers the same message twice
+// or when the free AI model fires two response chunks.
+const _processing = new Map(); // phoneNumber -> timestamp of last processing start
+
+const isAlreadyProcessing = (phoneNumber) => {
+  const last = _processing.get(phoneNumber);
+  if (!last) return false;
+  // If the same phone has been processing for less than 8 seconds, block duplicate
+  return (Date.now() - last) < 8000;
+};
+
+const markProcessingStart = (phoneNumber) => _processing.set(phoneNumber, Date.now());
+const markProcessingDone  = (phoneNumber) => _processing.delete(phoneNumber);
+
+// ── Core read/write ───────────────────────────────────────────────────────────
+
 const getHistoryAndProfile = async (phoneNumber) => {
   const phone = normalizePhone(phoneNumber);
   try {
@@ -55,12 +53,8 @@ const getHistoryAndProfile = async (phoneNumber) => {
 };
 
 /**
- * Save both the user message and the assistant reply together in one DB write.
- * This prevents the desync bug where a user message was saved but the bot
- * crashed before saving the reply — which would confuse the AI on next turn.
- * 
- * Both messages are appended atomically. If only the user message needs saving
- * (e.g. error path), pass null for assistantContent.
+ * Save user message and assistant reply together in one atomic write.
+ * This prevents desync: if bot crashes mid-reply, both or neither are saved.
  */
 const appendExchange = async (phoneNumber, userContent, assistantContent) => {
   const phone = normalizePhone(phoneNumber);
@@ -84,15 +78,15 @@ const appendExchange = async (phoneNumber, userContent, assistantContent) => {
 };
 
 /**
- * Update permanent profile fields for a customer.
- * Profile survives history trims and bot restarts.
- * Only non-empty values are written to avoid accidentally clearing data.
+ * Update permanent profile. Only non-empty values are written.
+ * Profile survives history trims and bot restarts completely.
  */
 const updateProfile = async (phoneNumber, data = {}) => {
   const phone = normalizePhone(phoneNumber);
   try {
     const set = { updatedAt: new Date() };
     if (data.name)         set["profile.name"]         = data.name;
+    if (data.phone)        set["profile.phone"]        = data.phone;
     if (data.email)        set["profile.email"]        = data.email;
     if (data.address)      set["profile.address"]      = data.address;
     if (data.linkedUserId) set["profile.linkedUserId"] = data.linkedUserId;
@@ -109,33 +103,26 @@ const updateProfile = async (phoneNumber, data = {}) => {
 };
 
 /**
- * Save WhatsApp push name (display name) ONLY if the customer has never
- * told the bot their actual name. This prevents the display name from
- * overwriting a proper name the customer shared during registration or ordering.
+ * Save WhatsApp display name ONLY if profile name is still empty.
+ * Never overwrites a name the customer actually told us.
  */
 const savePushNameIfNew = async (phoneNumber, pushName) => {
   if (!pushName) return;
   const phone = normalizePhone(phoneNumber);
   try {
-    // Only set name if profile.name is currently empty
     await Conversation.findOneAndUpdate(
-      { phoneNumber: phone, "profile.name": { $in: [null, ""] } },
+      { phoneNumber: phone, $or: [{ "profile.name": "" }, { "profile.name": null }] },
       {
         $set: { "profile.name": pushName, updatedAt: new Date() },
         $setOnInsert: { createdAt: new Date() },
       },
       { upsert: true }
     );
-    console.log(`[CTX] Push name saved for ${phone}: ${pushName}`);
   } catch (e) {
     console.error("[CTX] savePushNameIfNew error:", e.message);
   }
 };
 
-/**
- * Increment order count and record last order timestamp.
- * Used after a confirmed order to track customer loyalty.
- */
 const recordOrder = async (phoneNumber) => {
   const phone = normalizePhone(phoneNumber);
   try {
@@ -153,17 +140,15 @@ const recordOrder = async (phoneNumber) => {
 };
 
 /**
- * Trim chat history to last 20 messages after a completed order,
- * but ALWAYS keep the full profile intact.
- * This prevents the AI context from getting stale after an order
- * while ensuring the customer never has to re-introduce themselves.
+ * After a completed order, trim history to last 20 messages.
+ * Profile is NEVER touched — customer never has to re-introduce themselves.
  */
 const trimHistoryAfterOrder = async (phoneNumber) => {
   const phone = normalizePhone(phoneNumber);
   try {
     const doc = await Conversation.findOne({ phoneNumber: phone });
     if (!doc) return;
-    const trimmed = doc.history.slice(-20); // keep last 20 messages
+    const trimmed = doc.history.slice(-20);
     await Conversation.findOneAndUpdate(
       { phoneNumber: phone },
       { $set: { history: trimmed, updatedAt: new Date() } }
@@ -175,6 +160,9 @@ const trimHistoryAfterOrder = async (phoneNumber) => {
 
 module.exports = {
   normalizePhone,
+  isAlreadyProcessing,
+  markProcessingStart,
+  markProcessingDone,
   getHistoryAndProfile,
   appendExchange,
   updateProfile,
