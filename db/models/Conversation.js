@@ -7,25 +7,28 @@ const messageSchema = new mongoose.Schema({
 });
 
 const conversationSchema = new mongoose.Schema({
-  // Clean 10-digit phone number — always normalized before saving
   phoneNumber: { type: String, required: true, unique: true, index: true },
+  history:     [messageSchema],
 
-  // Rolling chat history — last 100 messages kept
-  history: [messageSchema],
-
-  // Permanent profile — survives history trims and bot restarts
-  // Everything here is injected into the AI system prompt so it never forgets
   profile: {
-    name:         { type: String, default: "" },
-    phone:        { type: String, default: "" }, // stored explicitly so it can be sent to website API
-    email:        { type: String, default: "" },
-    address:      { type: String, default: "" },
-    linkedUserId: { type: String, default: "" }, // website User._id once linked
-    totalOrders:  { type: Number, default: 0 },
-    lastOrderAt:  { type: Date },
-    lastPlanSeen: { type: String, default: "" },
-    healthNotes:  { type: String, default: "" },
-    adminNote:    { type: String, default: "" }, // internal admin note, never shown to customer
+    name:              { type: String,  default: "" },
+    phone:             { type: String,  default: "" },
+    email:             { type: String,  default: "" },
+    address:           { type: String,  default: "" },
+    linkedUserId:      { type: String,  default: "" },
+    totalOrders:       { type: Number,  default: 0 },
+    lastOrderAt:       { type: Date },
+    lastPlanSeen:      { type: String,  default: "" },
+    healthNotes:       { type: String,  default: "" },
+    adminNote:         { type: String,  default: "" },
+    mealPreference:    { type: String,  default: "standard" }, // standard / sattvic / custom
+    lastOrderItems:    { type: String,  default: "" },         // last ordered items (for reorder suggestion)
+    lastFeedbackAt:    { type: Date },                         // last time we asked for feedback
+    subscriptionEndAt: { type: Date },                         // for renewal reminders
+    reminderSentAt:    { type: Date },                         // last reminder sent
+    isTransferred:     { type: Boolean, default: false },      // currently talking to owner
+    deliveryZone:      { type: String,  default: "" },         // approved / pending_approval / outside
+    firstMessageSent:  { type: Boolean, default: false },      // welcome flow sent
   },
 
   createdAt: { type: Date, default: Date.now },
