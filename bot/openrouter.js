@@ -1,13 +1,14 @@
 const getSystemPrompt = require("./systemPrompt");
 
-const chat = async (userMessage, history = [], profile = {}) => {
+const chat = async (userMessage, history = [], profile = {}, accountData = null) => {
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey || apiKey.startsWith("sk-or-v1-xxx")) {
     throw new Error("OPENROUTER_API_KEY not configured");
   }
 
   const model = process.env.OPENROUTER_MODEL || "meta-llama/llama-3.3-70b-instruct:free";
-  const systemPrompt = await getSystemPrompt(profile);
+  // Pass accountData into systemPrompt so live account info is injected when available
+  const systemPrompt = await getSystemPrompt(profile, accountData);
 
   const messages = [
     { role: "system", content: systemPrompt },
@@ -15,7 +16,7 @@ const chat = async (userMessage, history = [], profile = {}) => {
     { role: "user",   content: userMessage },
   ];
 
-  console.log(`[AI] model=${model} history=${history.length} hasProfile=${!!profile.name}`);
+  console.log(`[AI] model=${model} history=${history.length} hasProfile=${!!profile.name} hasAccountData=${!!accountData}`);
 
   const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
@@ -25,7 +26,7 @@ const chat = async (userMessage, history = [], profile = {}) => {
       "HTTP-Referer":  "https://satvikmeals.in",
       "X-Title":       "SatvikMeals WhatsApp Bot",
     },
-    body: JSON.stringify({ model, messages, max_tokens: 600, temperature: 0.35 }),
+    body: JSON.stringify({ model, messages, max_tokens: 700, temperature: 0.35 }),
   });
 
   const raw = await response.text();
