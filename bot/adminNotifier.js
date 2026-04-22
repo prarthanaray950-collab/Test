@@ -473,10 +473,16 @@ const handleAdminCommand = async (text) => {
 
 // ── Check if a JID is the admin ───────────────────────────────────────────────
 const isAdminJid = (jid) => {
-  const phone = ADMIN_PHONE();
+  const phone = ADMIN_PHONE(); // always 10 digits after normalization
   if (!phone) return false;
-  return jid === `${phone}@s.whatsapp.net` ||
-         jid === `91${phone}@s.whatsapp.net`;
+  // WhatsApp JIDs for Indian numbers always arrive as 91XXXXXXXXXX@s.whatsapp.net
+  // We check all possible formats to be bulletproof
+  const stripped = jid.replace("@s.whatsapp.net", "").replace(/\D/g, "");
+  return (
+    stripped === phone ||           // 9876543210
+    stripped === `91${phone}` ||    // 919876543210
+    stripped === `0${phone}`        // 09876543210 (rare)
+  );
 };
 
 module.exports = {
