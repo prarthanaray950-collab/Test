@@ -62,13 +62,13 @@ const attemptChat = async (apiKey, model, messages) => {
   }
 };
 
-const chat = async (userMessage, history = [], profile = {}, accountData = null) => {
+const chat = async (userMessage, history = [], profile = {}, accountData = null, isNewUser = false) => {
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey || apiKey.startsWith("sk-or-v1-xxx")) {
     throw new Error("OPENROUTER_API_KEY not configured");
   }
 
-  const systemPrompt = await getSystemPrompt(profile, accountData);
+  const systemPrompt = await getSystemPrompt(profile, accountData, isNewUser);
 
   const messages = [
     { role: "system", content: systemPrompt },
