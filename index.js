@@ -11,6 +11,7 @@ const { useMongoAuthState } = require("./db/mongoAuthState");
 const connectDB             = require("./db/connect");
 const { handleMessage }     = require("./bot/messageHandler");
 const admin                 = require("./bot/adminNotifier");
+const Conversation          = require("./db/models/Conversation");
 
 const express = require("express");
 const qrcode  = require("qrcode");
@@ -84,19 +85,52 @@ app.listen(PORT, () => console.log(`[Server] Running on port ${PORT}`));
 process.on("unhandledRejection", (r) => console.error("[UnhandledRejection]", r));
 process.on("uncaughtException",  (e) => console.error("[UncaughtException]", e.message));
 
-let isConnecting = false;
-let activeSock   = null; // track the single active socket
+// ── Admin broadcast HTTP endpoint ─────────────────────────────────────────────
+app.use(express.json());
 
-// Message ID deduplication — prevents double processing when WhatsApp
-// delivers the same message twice (common on reconnects).
-// We keep the last 500 IDs; older ones are evicted automatically.
-const _seenMsgIds = new Set();
-const MAX_SEEN    = 500;
-const markSeen = (id) => {
-  if (_seenMsgIds.size >= MAX_SEEN) {
-    // Evict the oldest entry
-    _seenMsgIds.delete(_seenMsgIds.values().next().value);
+app.post("/api/admin/broadcast", async (req, res) => {
+  const { secret, message, phones } = req.body || {};
+  if (!secret || secret !== (process.env.BOT_SECRET || ""))
+    return res.status(401).json({ ok: false, error: "Unauthorized" });
+  if (!message?.trim())
+    return res.status(400).json({ ok: false, error: "message required" });
+  try {
+    let targets = Array.isArray(phones) && phones.length
+      ? phones
+      : (await Conversation.find({}, { phoneNumber: 1 }).lean()).map(d => d.phoneNumber).filter(Boolean);
+    res.json({ ok: true, queued: targets.length });
+    const result = await admin.broadcast(targets, message.trim());
+    await admin.toEventsGroup(`📢 BROADCAST SENT
+Message: "${message.slice(0,80)}"
+Sent: ${result.sent} | Failed: ${result.failed}`);
+  } catch (e) {
+    console.error("[Broadcast API]", e.message);
   }
+});
+
+app.get("/api/admin/stats", async (req, res) => {
+  const secret = req.query.secret || req.headers["x-bot-secret"];
+  if (!secret || secret !== (process.env.BOT_SECRET || ""))
+    return res.status(401).json({ ok: false, error: "Unauthorized" });
+  try {
+    const total      = await Conversation.countDocuments();
+    const withOrders = await Conversation.countDocuments({ "profile.totalOrders": { $gt: 0 } });
+    const recent     = await Conversation.find({}, { phoneNumber: 1, "profile.name": 1, updatedAt: 1 })
+      .sort({ updatedAt: -1 }).limit(10).lean();
+    res.json({ ok: true, totalCustomers: total, customersWithOrders: withOrders, recentChats: recent });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ── Bot state ──────────────────────────────────────────────────────────────────
+let isConnecting = false;
+let activeSock   = null;
+
+// Message ID deduplication — prevents double replies when WhatsApp re-delivers
+const _seenMsgIds = new Set();
+const markSeen = (id) => {
+  if (_seenMsgIds.size >= 500) _seenMsgIds.delete(_seenMsgIds.values().next().value);
   _seenMsgIds.add(id);
 };
 
@@ -104,20 +138,18 @@ const startBot = async () => {
   if (isConnecting) return;
   isConnecting = true;
 
-  // Tear down the previous socket cleanly before creating a new one.
-  // Without this, the old socket's event listeners stay alive and process
-  // every incoming message a second time — causing double replies.
+  // Tear down previous socket to prevent duplicate event listeners
   if (activeSock) {
-    try {
-      activeSock.ev.removeAllListeners();
-      activeSock.ws?.close();
-    } catch (_) {}
+    try { activeSock.ev.removeAllListeners(); activeSock.ws?.close(); } catch (_) {}
     activeSock = null;
     console.log("[Baileys] Previous socket torn down.");
   }
 
   try {
     await connectDB();
+
+    // Give Conversation model to admin so it can run DB queries for WhatsApp commands
+    admin.setConversationModel(Conversation);
 
     const { state, saveCreds } = await useMongoAuthState();
     const { version }          = await fetchLatestBaileysVersion();
@@ -134,8 +166,7 @@ const startBot = async () => {
       retryRequestDelayMs: 2_000,
     });
 
-    activeSock = sock; // register as the one active socket
-
+    activeSock = sock;
     sock.ev.on("creds.update", saveCreds);
 
     sock.ev.on("connection.update", async (update) => {
@@ -146,9 +177,7 @@ const startBot = async () => {
           currentQR = await qrcode.toDataURL(qr, { width: 300, margin: 2 });
           botStatus = "qr_ready";
           console.log("[QR] ✅ Ready — open your Render URL and scan.");
-        } catch (e) {
-          console.error("[QR] Failed:", e.message);
-        }
+        } catch (e) { console.error("[QR] Failed:", e.message); }
       }
 
       if (connection === "close") {
@@ -183,11 +212,10 @@ const startBot = async () => {
         if (!jid || isJidGroup(jid)) continue;
         if (jid === "status@broadcast") continue;
 
-        // Deduplicate by message ID — WhatsApp sometimes re-delivers the
-        // same message after a reconnect, which would cause a double reply.
+        // Deduplicate by message ID
         const msgId = msg.key.id;
         if (msgId && _seenMsgIds.has(msgId)) {
-          console.warn(`[SKIP] Duplicate message ID: ${msgId}`);
+          console.warn(`[SKIP] Duplicate msgId: ${msgId}`);
           continue;
         }
         if (msgId) markSeen(msgId);
@@ -203,6 +231,17 @@ const startBot = async () => {
         if (!text.trim()) continue;
 
         const pushName = msg.pushName || "";
+
+        // ── Admin WhatsApp commands (DM from admin number) ──────────────────
+        if (admin.isAdminJid(jid)) {
+          const handled = await admin.handleAdminCommand(text.trim()).catch(e => {
+            console.error("[AdminCmd]", e.message);
+            return false;
+          });
+          if (handled) continue; // don't process as customer message
+        }
+
+        // ── Normal customer message ─────────────────────────────────────────
         handleMessage(sock, jid, text.trim(), pushName).catch((e) =>
           console.error(`[MsgErr] ${jid}: ${e.message}`)
         );
