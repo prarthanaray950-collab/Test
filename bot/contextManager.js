@@ -21,19 +21,16 @@ const normalizePhone = (raw) => {
   return digits.slice(-10);
 };
 
-// ── Duplicate message guard ───────────────────────────────────────────────────
-// Prevents double replies when WhatsApp delivers the same message twice
-// or when the free AI model fires two response chunks.
-const _processing = new Map(); // phoneNumber -> timestamp of last processing start
+// ── Per-phone processing lock ────────────────────────────────────────────────
+// Prevents two messages from the same person running concurrently.
+// Lock is set when processing starts and ALWAYS cleared in the finally block.
+// This is NOT a time-based block — it only blocks while a reply is actively
+// being generated. Once the AI responds and the reply is sent, the lock is
+// immediately released and the next message is processed normally.
+const _processing = new Set();
 
-const isAlreadyProcessing = (phoneNumber) => {
-  const last = _processing.get(phoneNumber);
-  if (!last) return false;
-  // If the same phone has been processing for less than 8 seconds, block duplicate
-  return (Date.now() - last) < 8000;
-};
-
-const markProcessingStart = (phoneNumber) => _processing.set(phoneNumber, Date.now());
+const isAlreadyProcessing = (phoneNumber) => _processing.has(phoneNumber);
+const markProcessingStart = (phoneNumber) => _processing.add(phoneNumber);
 const markProcessingDone  = (phoneNumber) => _processing.delete(phoneNumber);
 
 // ── Core read/write ───────────────────────────────────────────────────────────
