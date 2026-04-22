@@ -255,12 +255,18 @@ const startBot = async () => {
         const pushName = msg.pushName || "";
 
         // ── Admin WhatsApp commands (DM from admin number) ──────────────────
+        // Log every DM so you can see the exact JID format in Render logs
+        console.log(`[MSG] JID: ${jid} | isAdmin: ${admin.isAdminJid(jid)} | text: ${text.slice(0,40)}`);
+
         if (admin.isAdminJid(jid)) {
           const handled = await admin.handleAdminCommand(text.trim()).catch(e => {
             console.error("[AdminCmd]", e.message);
             return false;
           });
           if (handled) continue; // don't process as customer message
+          // If not a ! command, still don't send to customer AI — send help hint
+          await admin.toDM(`Send !help to see all admin commands.`);
+          continue;
         }
 
         // ── Normal customer message ─────────────────────────────────────────
