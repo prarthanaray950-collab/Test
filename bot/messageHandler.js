@@ -66,6 +66,12 @@ const handleMessage = async (sock, rawJid, userText, pushName = "") => {
   const phoneNumber = ctx.normalizePhone(rawJid);
   console.log(`[IN]  ${phoneNumber}: ${userText.slice(0, 80)}`);
 
+  // ── Blocked customer guard ───────────────────────────────────────────────
+  if (admin.isBlocked(phoneNumber)) {
+    console.log(`[BLOCKED] ${phoneNumber}: message ignored`);
+    return;
+  }
+
   // ── Duplicate guard ────────────────────────────────────────────────────────
   if (ctx.isAlreadyProcessing(phoneNumber)) {
     console.warn(`[SKIP] ${phoneNumber}: duplicate blocked`);
