@@ -1,169 +1,145 @@
-/**
- * contextManager.js
- *
- * Handles all conversation storage per phone number in MongoDB.
- * Every customer gets their own isolated document keyed by their
- * clean 10-digit phone number. Everything persists across restarts.
- */
-
 const Conversation = require("../db/models/Conversation");
 
 const HISTORY_LIMIT = 100;
 
-// ── Phone normalization ───────────────────────────────────────────────────────
-// Handles all formats: 919876543210@s.whatsapp.net, +919876543210, 9876543210
 const normalizePhone = (raw) => {
-  const digits = String(raw)
-    .replace("@s.whatsapp.net", "")
-    .replace(/\D/g, "");
+  const digits = String(raw).replace("@s.whatsapp.net","").replace(/\D/g,"");
   if (digits.length === 12 && digits.startsWith("91")) return digits.slice(2);
   if (digits.length === 11 && digits.startsWith("0"))  return digits.slice(1);
   return digits.slice(-10);
 };
 
-// ── Per-phone processing lock ────────────────────────────────────────────────
-// Prevents two messages from the same person running concurrently.
-// Lock is set when processing starts and ALWAYS cleared in the finally block.
-// This is NOT a time-based block — it only blocks while a reply is actively
-// being generated. Once the AI responds and the reply is sent, the lock is
-// immediately released and the next message is processed normally.
 const _processing = new Set();
-
-const isAlreadyProcessing = (phoneNumber) => _processing.has(phoneNumber);
-const markProcessingStart = (phoneNumber) => _processing.add(phoneNumber);
-const markProcessingDone  = (phoneNumber) => _processing.delete(phoneNumber);
-
-// ── Core read/write ───────────────────────────────────────────────────────────
+const isAlreadyProcessing = (p) => _processing.has(p);
+const markProcessingStart = (p) => _processing.add(p);
+const markProcessingDone  = (p) => _processing.delete(p);
 
 const getHistoryAndProfile = async (phoneNumber) => {
   const phone = normalizePhone(phoneNumber);
   try {
     const doc = await Conversation.findOne({ phoneNumber: phone });
     return {
-      history: doc?.history?.slice(-HISTORY_LIMIT) || [],
-      profile: doc?.profile || {},
+      history:   doc?.history?.slice(-HISTORY_LIMIT) || [],
+      profile:   doc?.profile || {},
+      isNewUser: !doc,                             // true if first ever message
+      createdAt: doc?.createdAt || null,
     };
   } catch (e) {
-    console.error("[CTX] getHistoryAndProfile error:", e.message);
-    return { history: [], profile: {} };
+    console.error("[CTX] getHistoryAndProfile:", e.message);
+    return { history: [], profile: {}, isNewUser: true, createdAt: null };
   }
 };
 
-/**
- * Save user message and assistant reply together in one atomic write.
- * This prevents desync: if bot crashes mid-reply, both or neither are saved.
- */
 const appendExchange = async (phoneNumber, userContent, assistantContent) => {
   const phone = normalizePhone(phoneNumber);
   try {
     const messages = [{ role: "user", content: userContent, timestamp: new Date() }];
-    if (assistantContent) {
-      messages.push({ role: "assistant", content: assistantContent, timestamp: new Date() });
-    }
+    if (assistantContent) messages.push({ role: "assistant", content: assistantContent, timestamp: new Date() });
     await Conversation.findOneAndUpdate(
       { phoneNumber: phone },
-      {
-        $push: { history: { $each: messages } },
-        $set:  { updatedAt: new Date() },
-        $setOnInsert: { createdAt: new Date() },
-      },
+      { $push: { history: { $each: messages } }, $set: { updatedAt: new Date() }, $setOnInsert: { createdAt: new Date() } },
       { upsert: true, new: true }
     );
-  } catch (e) {
-    console.error("[CTX] appendExchange error:", e.message);
-  }
+  } catch (e) { console.error("[CTX] appendExchange:", e.message); }
 };
 
-/**
- * Update permanent profile. Only non-empty values are written.
- * Profile survives history trims and bot restarts completely.
- */
 const updateProfile = async (phoneNumber, data = {}) => {
   const phone = normalizePhone(phoneNumber);
   try {
     const set = { updatedAt: new Date() };
-    if (data.name)         set["profile.name"]         = data.name;
-    if (data.phone)        set["profile.phone"]        = data.phone;
-    if (data.email)        set["profile.email"]        = data.email;
-    if (data.address)      set["profile.address"]      = data.address;
-    if (data.linkedUserId) set["profile.linkedUserId"] = data.linkedUserId;
-    if (data.lastPlanSeen) set["profile.lastPlanSeen"] = data.lastPlanSeen;
-    if (data.healthNotes)  set["profile.healthNotes"]  = data.healthNotes;
-    await Conversation.findOneAndUpdate(
-      { phoneNumber: phone },
-      { $set: set },
-      { upsert: true }
-    );
-  } catch (e) {
-    console.error("[CTX] updateProfile error:", e.message);
-  }
+    const fields = ["name","phone","email","address","linkedUserId","lastPlanSeen",
+                    "healthNotes","adminNote","mealPreference","lastOrderItems",
+                    "lastFeedbackAt","subscriptionEndAt","reminderSentAt",
+                    "isTransferred","deliveryZone","firstMessageSent"];
+    for (const f of fields) {
+      if (data[f] !== undefined && data[f] !== null) set[`profile.${f}`] = data[f];
+    }
+    await Conversation.findOneAndUpdate({ phoneNumber: phone }, { $set: set }, { upsert: true });
+  } catch (e) { console.error("[CTX] updateProfile:", e.message); }
 };
 
-/**
- * Save WhatsApp display name ONLY if profile name is still empty.
- * Never overwrites a name the customer actually told us.
- */
 const savePushNameIfNew = async (phoneNumber, pushName) => {
   if (!pushName) return;
   const phone = normalizePhone(phoneNumber);
   try {
     await Conversation.findOneAndUpdate(
       { phoneNumber: phone, $or: [{ "profile.name": "" }, { "profile.name": null }] },
-      {
-        $set: { "profile.name": pushName, updatedAt: new Date() },
-        $setOnInsert: { createdAt: new Date() },
-      },
+      { $set: { "profile.name": pushName, updatedAt: new Date() }, $setOnInsert: { createdAt: new Date() } },
       { upsert: true }
     );
-  } catch (e) {
-    console.error("[CTX] savePushNameIfNew error:", e.message);
-  }
+  } catch (e) { console.error("[CTX] savePushNameIfNew:", e.message); }
 };
 
-const recordOrder = async (phoneNumber) => {
+const recordOrder = async (phoneNumber, items = "") => {
   const phone = normalizePhone(phoneNumber);
   try {
+    const set = { "profile.lastOrderAt": new Date(), updatedAt: new Date() };
+    if (items) set["profile.lastOrderItems"] = items;
     await Conversation.findOneAndUpdate(
       { phoneNumber: phone },
-      {
-        $inc: { "profile.totalOrders": 1 },
-        $set: { "profile.lastOrderAt": new Date(), updatedAt: new Date() },
-      },
+      { $inc: { "profile.totalOrders": 1 }, $set: set },
       { upsert: true }
     );
-  } catch (e) {
-    console.error("[CTX] recordOrder error:", e.message);
-  }
+  } catch (e) { console.error("[CTX] recordOrder:", e.message); }
 };
 
-/**
- * After a completed order, trim history to last 20 messages.
- * Profile is NEVER touched — customer never has to re-introduce themselves.
- */
 const trimHistoryAfterOrder = async (phoneNumber) => {
   const phone = normalizePhone(phoneNumber);
   try {
     const doc = await Conversation.findOne({ phoneNumber: phone });
     if (!doc) return;
-    const trimmed = doc.history.slice(-20);
     await Conversation.findOneAndUpdate(
       { phoneNumber: phone },
-      { $set: { history: trimmed, updatedAt: new Date() } }
+      { $set: { history: doc.history.slice(-20), updatedAt: new Date() } }
     );
-  } catch (e) {
-    console.error("[CTX] trimHistoryAfterOrder error:", e.message);
-  }
+  } catch (e) { console.error("[CTX] trimHistoryAfterOrder:", e.message); }
+};
+
+// Get all customers whose subscription ends within N days (for reminders)
+const getExpiringSubscriptions = async (withinDays = 2) => {
+  const now    = new Date();
+  const cutoff = new Date(now.getTime() + withinDays * 24 * 60 * 60 * 1000);
+  try {
+    return await Conversation.find({
+      "profile.subscriptionEndAt": { $gte: now, $lte: cutoff },
+    }, { phoneNumber: 1, "profile.name": 1, "profile.subscriptionEndAt": 1 }).lean();
+  } catch (e) { return []; }
+};
+
+// Get customers who received their last delivery >2 hours ago but haven't been asked for feedback today
+const getPendingFeedback = async () => {
+  const twoHoursAgo  = new Date(Date.now() - 2 * 60 * 60 * 1000);
+  const todayStart   = new Date(); todayStart.setHours(0,0,0,0);
+  try {
+    return await Conversation.find({
+      "profile.lastOrderAt":   { $lte: twoHoursAgo },
+      "profile.totalOrders":   { $gt: 0 },
+      $or: [
+        { "profile.lastFeedbackAt": { $lt: todayStart } },
+        { "profile.lastFeedbackAt": null },
+      ],
+    }, { phoneNumber: 1, "profile.name": 1 }).lean();
+  } catch (e) { return []; }
+};
+
+// Get all customers (for broadcast)
+const getAllPhones = async () => {
+  try {
+    const all = await Conversation.find({}, { phoneNumber: 1 }).lean();
+    return all.map(d => d.phoneNumber).filter(Boolean);
+  } catch (e) { return []; }
 };
 
 module.exports = {
   normalizePhone,
-  isAlreadyProcessing,
-  markProcessingStart,
-  markProcessingDone,
+  isAlreadyProcessing, markProcessingStart, markProcessingDone,
   getHistoryAndProfile,
   appendExchange,
   updateProfile,
   savePushNameIfNew,
   recordOrder,
   trimHistoryAfterOrder,
+  getExpiringSubscriptions,
+  getPendingFeedback,
+  getAllPhones,
 };
