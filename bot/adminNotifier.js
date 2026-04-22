@@ -475,20 +475,46 @@ const handleAdminCommand = async (text) => {
 const isAdminJid = (jid) => {
   const phone = ADMIN_PHONE(); // always 10 digits after normalization
   if (!phone) return false;
-  // WhatsApp JIDs for Indian numbers always arrive as 91XXXXXXXXXX@s.whatsapp.net
-  // We check all possible formats to be bulletproof
-  const stripped = jid.replace("@s.whatsapp.net", "").replace(/\D/g, "");
-  return (
-    stripped === phone ||           // 9876543210
-    stripped === `91${phone}` ||    // 919876543210
-    stripped === `0${phone}`        // 09876543210 (rare)
-  );
+
+  // WhatsApp sends two JID formats:
+  // 1. Normal: 919876543210@s.whatsapp.net
+  // 2. LID:    43761421836382@lid  (Linked Device ID — newer WhatsApp accounts)
+  // For @s.whatsapp.net we can extract the phone number and compare.
+  // For @lid we cannot extract the phone — so we store the LID on first match
+  // and compare against it on subsequent messages.
+
+  if (jid.endsWith("@s.whatsapp.net")) {
+    const stripped = jid.replace("@s.whatsapp.net", "").replace(/\D/g, "");
+    return stripped === phone || stripped === `91${phone}` || stripped === `0${phone}`;
+  }
+
+  if (jid.endsWith("@lid")) {
+    // If we have a stored admin LID, compare directly
+    if (_adminLid && jid === _adminLid) return true;
+    // We cannot verify LID against phone number — check env var for explicit LID
+    const envLid = (process.env.ADMIN_LID || "").trim();
+    if (envLid && jid === envLid) return true;
+  }
+
+  return false;
+};
+
+// Store admin LID once discovered so isAdminJid works on subsequent messages
+let _adminLid = null;
+
+const learnAdminLid = (jid) => {
+  if (jid.endsWith("@lid") && !_adminLid) {
+    _adminLid = jid;
+    console.log(`[Admin] LID learned: ${jid} — set ADMIN_LID=${jid} in .env to persist`);
+    toDM(`Admin LID detected: ${jid}\n\nTo persist this across restarts, add to your Render env:\nADMIN_LID=${jid}`).catch(() => {});
+  }
 };
 
 module.exports = {
   setSocket,
   setConversationModel,
   isAdminJid,
+  learnAdminLid,
   isBlocked,
   handleAdminCommand,
   toDM,
