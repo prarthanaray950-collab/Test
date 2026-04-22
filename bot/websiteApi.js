@@ -1,6 +1,14 @@
+/**
+ * websiteApi.js
+ * All website API calls the bot can make.
+ * Every write route is protected by x-bot-secret header.
+ * Reads use public routes or bot routes depending on endpoint.
+ */
+
 const BASE   = () => (process.env.WEBSITE_API_URL || "https://satvikmeals.in").replace(/\/$/, "");
 const SECRET = () => process.env.BOT_SECRET || "";
 
+// Cache for menu and plans (10 min TTL)
 let _menuCache = null, _menuAt = 0;
 let _planCache = null, _planAt = 0;
 const CACHE_TTL = 10 * 60 * 1000;
@@ -19,7 +27,7 @@ const apiFetch = async (path, options = {}) => {
   try { return JSON.parse(text); } catch { return { raw: text }; }
 };
 
-// ── READ (public routes, no secret needed) ────────────────────────────────────
+// ── MENU & PLANS (public read) ────────────────────────────────────────────────
 const getLiveMenu = async () => {
   if (_menuCache && Date.now() - _menuAt < CACHE_TTL) return _menuCache;
   const data = await fetch(`${BASE()}/api/menu/current`).then(r => r.json());
@@ -34,28 +42,54 @@ const getLivePlans = async () => {
   return data;
 };
 
-// ── WRITE (bot-secret protected /api/bot/* routes) ────────────────────────────
-const createOrder          = (p) => apiFetch("/api/bot/orders",        { method: "POST",  body: JSON.stringify(p) });
-const updateOrderStatus    = (id, s) => apiFetch(`/api/bot/orders/${id}`, { method: "PATCH", body: JSON.stringify({ paymentStatus: s }) });
-const getOrdersByPhone     = (ph) => apiFetch(`/api/bot/orders?phone=${encodeURIComponent(ph)}`);
-const findOrCreateUser     = (p) => apiFetch("/api/bot/users",         { method: "POST",  body: JSON.stringify(p) });
-const getUserByPhone       = (ph) => apiFetch(`/api/bot/users?phone=${encodeURIComponent(ph)}`);
-const updateUser           = (id, d) => apiFetch(`/api/bot/users/${id}`, { method: "PATCH", body: JSON.stringify(d) });
-const createSubscriptionLead = (p) => apiFetch("/api/bot/subscriptions", { method: "POST",  body: JSON.stringify(p) });
-const submitComplaint      = (p) => apiFetch("/api/bot/complaint",     { method: "POST",  body: JSON.stringify(p) });
-const updateMenuDay        = (id, d) => apiFetch(`/api/bot/menu/${id}`, { method: "PATCH", body: JSON.stringify(d) });
-const createMenuWeek       = (d) => apiFetch("/api/bot/menu",          { method: "POST",  body: JSON.stringify(d) });
-const createPlan           = (d) => apiFetch("/api/bot/plans",         { method: "POST",  body: JSON.stringify(d) });
-const updatePlan           = (id, d) => apiFetch(`/api/bot/plans/${id}`, { method: "PATCH", body: JSON.stringify(d) });
-const getDashboardStats    = () => apiFetch("/api/bot/admin/stats");
+const getTodayMenu = async () => {
+  const days = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+  const today = days[new Date().getDay()];
+  const data  = await getLiveMenu().catch(() => null);
+  if (!data?.items) return null;
+  return data.items.find(d => d.day === today) || null;
+};
+
+// ── USERS ─────────────────────────────────────────────────────────────────────
+const findOrCreateUser  = (p)    => apiFetch("/api/bot/users",          { method: "POST",  body: JSON.stringify(p) });
+const getUserByPhone    = (ph)   => apiFetch(`/api/bot/users?phone=${encodeURIComponent(ph)}`);
+const updateUser        = (id, d)=> apiFetch(`/api/bot/users/${id}`,    { method: "PATCH", body: JSON.stringify(d) });
+const updateUserByPhone = (ph, d)=> apiFetch(`/api/bot/users/by-phone/${encodeURIComponent(ph)}`, { method: "PATCH", body: JSON.stringify(d) });
+
+// ── ORDERS ────────────────────────────────────────────────────────────────────
+const createOrder       = (p)    => apiFetch("/api/bot/orders",         { method: "POST",  body: JSON.stringify(p) });
+const updateOrderStatus = (id, s)=> apiFetch(`/api/bot/orders/${id}`,   { method: "PATCH", body: JSON.stringify({ paymentStatus: s }) });
+const getOrdersByPhone  = (ph)   => apiFetch(`/api/bot/orders?phone=${encodeURIComponent(ph)}`);
+const confirmPayment    = (p)    => apiFetch("/api/bot/orders/payment-confirm", { method: "POST", body: JSON.stringify(p) });
+
+// ── SUBSCRIPTIONS ─────────────────────────────────────────────────────────────
+const createSubscriptionLead = (p)  => apiFetch("/api/bot/subscriptions",          { method: "POST",  body: JSON.stringify(p) });
+const getSubscriptionByPhone = (ph) => apiFetch(`/api/bot/subscriptions?phone=${encodeURIComponent(ph)}`);
+const pauseSubscription      = (p)  => apiFetch("/api/bot/subscriptions/pause",    { method: "POST",  body: JSON.stringify(p) });
+const resumeSubscription     = (p)  => apiFetch("/api/bot/subscriptions/resume",   { method: "POST",  body: JSON.stringify(p) });
+const cancelSubscription     = (p)  => apiFetch("/api/bot/subscriptions/cancel",   { method: "POST",  body: JSON.stringify(p) });
+const changePlan             = (p)  => apiFetch("/api/bot/subscriptions/change-plan", { method: "POST", body: JSON.stringify(p) });
+const updateDeliveryAddress  = (p)  => apiFetch("/api/bot/subscriptions/address",  { method: "PATCH", body: JSON.stringify(p) });
+const updateMealPreference   = (p)  => apiFetch("/api/bot/subscriptions/preference",{ method: "PATCH", body: JSON.stringify(p) });
+const applyCoins             = (p)  => apiFetch("/api/bot/subscriptions/apply-coins",{ method: "POST", body: JSON.stringify(p) });
+
+// ── COMPLAINTS & FEEDBACK ─────────────────────────────────────────────────────
+const submitComplaint        = (p)  => apiFetch("/api/bot/complaint",   { method: "POST",  body: JSON.stringify(p) });
+const requestCallback        = (p)  => apiFetch("/api/bot/callback",    { method: "POST",  body: JSON.stringify(p) });
+
+// ── ADMIN MENU & PLANS ────────────────────────────────────────────────────────
+const updateMenuDay   = (id, d)  => apiFetch(`/api/bot/menu/${id}`,   { method: "PATCH", body: JSON.stringify(d) });
+const createMenuWeek  = (d)      => apiFetch("/api/bot/menu",          { method: "POST",  body: JSON.stringify(d) });
+const createPlan      = (d)      => apiFetch("/api/bot/plans",         { method: "POST",  body: JSON.stringify(d) });
+const updatePlan      = (id, d)  => apiFetch(`/api/bot/plans/${id}`,   { method: "PATCH", body: JSON.stringify(d) });
+const getDashboardStats = ()     => apiFetch("/api/bot/admin/stats");
 
 // ── Format helpers ────────────────────────────────────────────────────────────
 const formatMenu = (data) => {
   if (!data?.items?.length) return "Is hafte ka menu abhi update nahi hua. Call: 6201276506";
-  const ORDER = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-  const days = data.items
-    .filter(d => ORDER.includes(d.day))
-    .sort((a, b) => ORDER.indexOf(a.day) - ORDER.indexOf(b.day));
+  const ORDER = ["Mon","Tue","Wed","Thu","Fri","Sat"];
+  const days  = data.items.filter(d => ORDER.includes(d.day))
+                           .sort((a,b) => ORDER.indexOf(a.day) - ORDER.indexOf(b.day));
   const lines = [];
   for (const d of days) {
     lines.push(`${d.day}:`);
@@ -77,12 +111,18 @@ const formatPlans = (plans) => {
 };
 
 module.exports = {
-  getLiveMenu, getLivePlans,
-  createOrder, updateOrderStatus, getOrdersByPhone,
-  findOrCreateUser, getUserByPhone, updateUser,
-  createSubscriptionLead, submitComplaint,
-  updateMenuDay, createMenuWeek,
-  createPlan, updatePlan,
-  getDashboardStats,
-  formatMenu, formatPlans,
+  // Menu & Plans
+  getLiveMenu, getLivePlans, getTodayMenu, formatMenu, formatPlans,
+  // Users
+  findOrCreateUser, getUserByPhone, updateUser, updateUserByPhone,
+  // Orders
+  createOrder, updateOrderStatus, getOrdersByPhone, confirmPayment,
+  // Subscriptions
+  createSubscriptionLead, getSubscriptionByPhone,
+  pauseSubscription, resumeSubscription, cancelSubscription,
+  changePlan, updateDeliveryAddress, updateMealPreference, applyCoins,
+  // Complaints & Callbacks
+  submitComplaint, requestCallback,
+  // Admin
+  updateMenuDay, createMenuWeek, createPlan, updatePlan, getDashboardStats,
 };
