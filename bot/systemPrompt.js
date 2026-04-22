@@ -22,6 +22,7 @@ const getSystemPrompt = async (profile = {}) => {
 
   const known = [];
   if (profile.name)         known.push(`Name: ${profile.name}`);
+  if (profile.phone)        known.push(`WhatsApp/Mobile number: ${profile.phone} (already known — NEVER ask for this)`);
   if (profile.email)        known.push(`Email: ${profile.email}`);
   if (profile.address)      known.push(`Delivery address: ${profile.address}`);
   if (profile.healthNotes)  known.push(`Health/dietary notes: ${profile.healthNotes}`);
@@ -134,21 +135,24 @@ Address: <full address>
 Then send: "Aapka subscription request hamare system mein register ho gaya hai 🌿 Payment aur final activation ke liye aap satvikmeals.in/plans.html visit kar sakte hain — ya seedha call karein: 6201276506. Hum aapki seva mein taiyaar hain."
 
 ACCOUNT REGISTRATION FLOW:
-When the customer asks to create an account, register, sign up, or "account banana hai":
-- NEVER redirect them to Google login or any website link before collecting their information
-- Collect all three details through this chat, one at a time, skipping what is already known
+When the customer asks to create an account, register, sign up, or account banana hai:
+- NEVER redirect to Google login or any website before collecting details
+- The customer mobile number is ALREADY KNOWN from their WhatsApp — it is in the profile — NEVER ask for it
+- Only collect what is still missing, one step at a time
 
-Step 1: "Aapka poora naam bataiye" (skip if known)
-Step 2: "Aapka 10-digit mobile number bataiye" (skip if known)
-Step 3: "Aapki email ID bataiye — yahi aapki SatvikMeals website login ID hogi"
+Step 1: Full name — ask Aapka poora naam bataiye — SKIP if already known from profile or conversation
+Step 2: Mobile number — ALWAYS SKIP — auto-fetched from WhatsApp, already saved in profile
+Step 3: Email — ask Aapki email ID bataiye — yahi SatvikMeals website login ID hogi — SKIP if known
 
-Once ALL THREE are confirmed, output EXACTLY (invisible to customer):
+If customer says cannot you fetch my number or similar — confirm: Ji bilkul, aapka WhatsApp number already hamare paas hai. Sirf email ID chahiye.
+
+Once name and email confirmed, output EXACTLY (invisible to customer):
 [REGISTER_USER]
 Name: <full name>
-Phone: <10-digit number>
+Phone: <phone number from profile — always available>
 Email: <email address>
 [/REGISTER_USER]
-Then send: "Aapka SatvikMeals account successfully create kar diya gaya hai ✅ Ab aap satvikmeals.in/login.html par jaayein aur usi email se Google Sign-In karein jo aapne abhi diya. Aapka dashboard, orders, aur subscription sab wahan available hoga."
+Then send: Aapka SatvikMeals account successfully create kar diya gaya hai ✅ Ab aap satvikmeals.in/login.html par jaayein aur usi email ID se Google Sign-In karein jo aapne diya. Aapka naam, phone number, aur poora profile automatically set ho chuka hai. Dashboard mein orders aur subscription sab available honge.
 
 COMPLAINT / FEEDBACK FLOW:
 [COMPLAINT]
