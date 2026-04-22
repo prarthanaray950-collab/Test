@@ -85,10 +85,36 @@ process.on("unhandledRejection", (r) => console.error("[UnhandledRejection]", r)
 process.on("uncaughtException",  (e) => console.error("[UncaughtException]", e.message));
 
 let isConnecting = false;
+let activeSock   = null; // track the single active socket
+
+// Message ID deduplication — prevents double processing when WhatsApp
+// delivers the same message twice (common on reconnects).
+// We keep the last 500 IDs; older ones are evicted automatically.
+const _seenMsgIds = new Set();
+const MAX_SEEN    = 500;
+const markSeen = (id) => {
+  if (_seenMsgIds.size >= MAX_SEEN) {
+    // Evict the oldest entry
+    _seenMsgIds.delete(_seenMsgIds.values().next().value);
+  }
+  _seenMsgIds.add(id);
+};
 
 const startBot = async () => {
   if (isConnecting) return;
   isConnecting = true;
+
+  // Tear down the previous socket cleanly before creating a new one.
+  // Without this, the old socket's event listeners stay alive and process
+  // every incoming message a second time — causing double replies.
+  if (activeSock) {
+    try {
+      activeSock.ev.removeAllListeners();
+      activeSock.ws?.close();
+    } catch (_) {}
+    activeSock = null;
+    console.log("[Baileys] Previous socket torn down.");
+  }
 
   try {
     await connectDB();
@@ -107,6 +133,8 @@ const startBot = async () => {
       keepAliveIntervalMs: 30_000,
       retryRequestDelayMs: 2_000,
     });
+
+    activeSock = sock; // register as the one active socket
 
     sock.ev.on("creds.update", saveCreds);
 
@@ -154,6 +182,15 @@ const startBot = async () => {
         const jid = msg.key.remoteJid;
         if (!jid || isJidGroup(jid)) continue;
         if (jid === "status@broadcast") continue;
+
+        // Deduplicate by message ID — WhatsApp sometimes re-delivers the
+        // same message after a reconnect, which would cause a double reply.
+        const msgId = msg.key.id;
+        if (msgId && _seenMsgIds.has(msgId)) {
+          console.warn(`[SKIP] Duplicate message ID: ${msgId}`);
+          continue;
+        }
+        if (msgId) markSeen(msgId);
 
         const text =
           msg.message?.conversation ||
