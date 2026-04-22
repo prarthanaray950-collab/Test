@@ -2,12 +2,12 @@
  * messageHandler.js
  *
  * Core pipeline for every incoming WhatsApp message:
- * 1. Normalize phone to clean 10-digit number
- * 2. Duplicate guard — block if same phone already being processed
- * 3. Load full history + profile from MongoDB
- * 4. Auto-store phone number in profile (so it's always available for registration)
- * 5. Send full context to AI
- * 6. Parse action blocks, execute side effects (register user, subscription, etc.)
+ * 1. Normalize phone, duplicate guard
+ * 2. Load full history + profile from MongoDB
+ * 3. Auto-store phone in profile
+ * 4. Get AI reply
+ * 5. If AI requests [FETCH_ACCOUNT] — fetch real data from website, retry with it
+ * 6. Parse all action blocks and execute side effects
  * 7. Save exchange atomically, send reply
  */
 
@@ -23,8 +23,12 @@ const extractBlock = (text, tag) => {
   return {
     get: (key) => { const r = body.match(new RegExp(`${key}:\\s*(.+)`)); return r ? r[1].trim() : ""; },
     raw: body.trim(),
+    found: true,
   };
 };
+
+const hasBlock = (text, tag) =>
+  new RegExp(`\\[${tag}\\]`).test(text);
 
 const cleanReply = (text) =>
   text
@@ -33,47 +37,74 @@ const cleanReply = (text) =>
     .replace(/\[SUBSCRIPTION_INTEREST\][\s\S]*?\[\/SUBSCRIPTION_INTEREST\]/g, "")
     .replace(/\[COMPLAINT\][\s\S]*?\[\/COMPLAINT\]/g, "")
     .replace(/\[HEALTH_NOTE\][\s\S]*?\[\/HEALTH_NOTE\]/g, "")
+    .replace(/\[FETCH_ACCOUNT\][\s\S]*?\[\/FETCH_ACCOUNT\]/g, "")
     .trim();
+
+// Fetch live account data from the website API
+const fetchAccountData = async (phoneNumber, profile) => {
+  try {
+    const [ordersRes, userRes] = await Promise.allSettled([
+      api.getOrdersByPhone(phoneNumber),
+      profile.linkedUserId
+        ? api.getUserByPhone(phoneNumber)
+        : Promise.resolve(null),
+    ]);
+    const orders = ordersRes.status === "fulfilled" ? (ordersRes.value?.orders || ordersRes.value || []) : [];
+    const user   = userRes.status === "fulfilled"   ? userRes.value : null;
+    return {
+      totalOrders:    orders.length,
+      activePlan:     user?.activePlan || user?.subscription?.plan || null,
+      orders:         Array.isArray(orders) ? orders : [],
+    };
+  } catch (e) {
+    console.error("[FETCH_ACCOUNT] Error:", e.message);
+    return null;
+  }
+};
 
 const handleMessage = async (sock, rawJid, userText, pushName = "") => {
   const phoneNumber = ctx.normalizePhone(rawJid);
   console.log(`[IN]  ${phoneNumber}: ${userText.slice(0, 80)}`);
 
-  // ── Duplicate message guard ────────────────────────────────────────────────
-  // Blocks duplicate processing if WhatsApp delivers same message twice,
-  // or if free AI model fires two response chunks for one message.
+  // ── Duplicate guard ────────────────────────────────────────────────────────
   if (ctx.isAlreadyProcessing(phoneNumber)) {
-    console.warn(`[SKIP] ${phoneNumber}: duplicate message blocked`);
+    console.warn(`[SKIP] ${phoneNumber}: duplicate blocked`);
     return;
   }
   ctx.markProcessingStart(phoneNumber);
 
   try {
-    // ── Load full history + profile ────────────────────────────────────────
+    // ── Load history + profile ─────────────────────────────────────────────
     const { history, profile } = await ctx.getHistoryAndProfile(phoneNumber);
 
-    // ── Auto-store phone number in profile ─────────────────────────────────
-    // The customer's WhatsApp number IS their phone number.
-    // We store it in the profile so the AI and registration flow always has it.
+    // ── Auto-store phone in profile ────────────────────────────────────────
     if (!profile.phone) {
       await ctx.updateProfile(phoneNumber, { phone: phoneNumber });
       profile.phone = phoneNumber;
     }
 
-    // ── Save push name only if no real name known yet ──────────────────────
+    // ── Save push name only if no real name known ──────────────────────────
     if (pushName && !profile.name) {
       await ctx.savePushNameIfNew(phoneNumber, pushName);
       profile.name = pushName;
     }
 
-    // ── Get AI reply — full history + profile every time ───────────────────
-    const aiReply = await chat(userText, history, profile);
+    // ── First AI call ──────────────────────────────────────────────────────
+    let aiReply = await chat(userText, history, profile, null);
     console.log(`[AI]  ${phoneNumber}: ${aiReply.slice(0, 100)}`);
+
+    // ── Handle [FETCH_ACCOUNT] — fetch real data and retry ─────────────────
+    if (hasBlock(aiReply, "FETCH_ACCOUNT")) {
+      console.log(`[FETCH_ACCOUNT] Fetching live data for ${phoneNumber}`);
+      const accountData = await fetchAccountData(phoneNumber, profile);
+      // Retry AI with the real account data injected into the system prompt
+      aiReply = await chat(userText, history, profile, accountData);
+      console.log(`[AI RETRY] ${phoneNumber}: ${aiReply.slice(0, 100)}`);
+    }
 
     const cleanedReply = cleanReply(aiReply);
 
-    // ── Save exchange atomically BEFORE sending ────────────────────────────
-    // Saved before sending so if WhatsApp delivery fails, history is still correct.
+    // ── Save exchange atomically ───────────────────────────────────────────
     await ctx.appendExchange(phoneNumber, userText, cleanedReply);
 
     let orderDone = false;
@@ -81,42 +112,25 @@ const handleMessage = async (sock, rawJid, userText, pushName = "") => {
     // ── REGISTER USER ──────────────────────────────────────────────────────
     const regBlock = extractBlock(aiReply, "REGISTER_USER");
     if (regBlock) {
-      // Pull from block, fall back to profile, fall back to known phone
       const name  = regBlock.get("Name")  || profile.name  || "Customer";
       const phone = regBlock.get("Phone") || profile.phone || phoneNumber;
       const email = regBlock.get("Email") || profile.email || "";
 
-      console.log(`[USER] Creating account: ${name} | ${phone} | ${email}`);
-
+      console.log(`[USER] Registering: ${name} | ${phone} | ${email}`);
       try {
-        // Create or update user on the website with all three fields
-        const result = await api.findOrCreateUser({
-          name, phone, email, source: "whatsapp_bot",
-        });
-
+        const result = await api.findOrCreateUser({ name, phone, email, source: "whatsapp_bot" });
         const userId = result?.user?._id || result?._id || result?.user?.id;
-
-        // If we got a user ID back, also PATCH the user to ensure all fields are set
-        // This handles cases where findOrCreate only created a minimal record
         if (userId) {
-          try {
-            await api.updateUser(userId, { name, phone, email });
-            console.log(`[USER] ✅ Profile updated on website for userId: ${userId}`);
-          } catch (ue) {
-            console.warn(`[USER] ⚠️ updateUser failed: ${ue.message}`);
-          }
+          try { await api.updateUser(userId, { name, phone, email }); } catch (_) {}
           await ctx.updateProfile(phoneNumber, { name, phone, email, linkedUserId: String(userId) });
         } else {
           await ctx.updateProfile(phoneNumber, { name, phone, email });
         }
-
         console.log(`[USER] ✅ ${name} (${phone}) ${email}`);
       } catch (e) {
         console.warn(`[USER] ⚠️ ${e.message}`);
-        // Still save to local profile even if website API failed
         await ctx.updateProfile(phoneNumber, { name, phone, email });
       }
-
       await admin.notifyNewUser({ phoneNumber, name, phone });
     }
 
@@ -127,20 +141,12 @@ const handleMessage = async (sock, rawJid, userText, pushName = "") => {
       const address      = orderBlock.get("Address") || profile.address || "";
       const item         = orderBlock.get("Item")    || "Tiffin";
       const amount       = parseInt(orderBlock.get("Amount").replace(/[^\d]/g, "")) || 0;
-
       try {
-        await api.createOrder({
-          phoneNumber,
-          customerName, address,
-          items:      [{ name: item, quantity: 1, price: amount }],
-          totalAmount: amount,
-          source:      "whatsapp_bot",
-        });
+        await api.createOrder({ phoneNumber, customerName, address,
+          items: [{ name: item, quantity: 1, price: amount }],
+          totalAmount: amount, source: "whatsapp_bot" });
         console.log(`[ORDER] ✅ ${customerName} Rs.${amount}`);
-      } catch (e) {
-        console.warn(`[ORDER] ⚠️ ${e.message}`);
-      }
-
+      } catch (e) { console.warn(`[ORDER] ⚠️ ${e.message}`); }
       await ctx.updateProfile(phoneNumber, { name: customerName, address });
       await ctx.recordOrder(phoneNumber);
       await admin.notifyNewOrder({ phoneNumber, customerName, address, item, amount });
@@ -154,19 +160,13 @@ const handleMessage = async (sock, rawJid, userText, pushName = "") => {
       const planName     = subBlock.get("Plan");
       const customerName = subBlock.get("Name")    || profile.name    || "";
       const address      = subBlock.get("Address") || profile.address || "";
-
       try {
-        await api.createSubscriptionLead({
-          phoneNumber, customerName, planName, address, source: "whatsapp_bot",
-        });
+        await api.createSubscriptionLead({ phoneNumber, customerName, planName, address, source: "whatsapp_bot" });
         console.log(`[SUB] ✅ ${planName}`);
-      } catch (e) {
-        console.warn(`[SUB] ⚠️ ${e.message}`);
-      }
-
+      } catch (e) { console.warn(`[SUB] ⚠️ ${e.message}`); }
       await ctx.updateProfile(phoneNumber, {
-        name:         customerName || undefined,
-        address:      address      || undefined,
+        name: customerName || undefined,
+        address: address   || undefined,
         lastPlanSeen: planName,
       });
       await admin.notifySubscriptionInterest({ phoneNumber, planName, customerName, address });
@@ -177,16 +177,10 @@ const handleMessage = async (sock, rawJid, userText, pushName = "") => {
     if (compBlock) {
       const type  = compBlock.get("Type")  || "complaint";
       const issue = compBlock.get("Issue") || compBlock.raw;
-
       try {
-        await api.submitComplaint({
-          phoneNumber, name: profile.name || "Unknown", type, issue, source: "whatsapp_bot",
-        });
+        await api.submitComplaint({ phoneNumber, name: profile.name || "Unknown", type, issue, source: "whatsapp_bot" });
         console.log(`[COMPLAINT] ✅`);
-      } catch (e) {
-        console.warn(`[COMPLAINT] ⚠️ ${e.message}`);
-      }
-
+      } catch (e) { console.warn(`[COMPLAINT] ⚠️ ${e.message}`); }
       await admin.notifyComplaint({ phoneNumber, type, issue });
     }
 
@@ -211,7 +205,6 @@ const handleMessage = async (sock, rawJid, userText, pushName = "") => {
       text: "Kuch technical issue aa gaya hai 🙏 Thodi der mein dobara try karein, ya seedha call karein: 6201276506",
     });
   } finally {
-    // Always release the processing lock, even if something threw
     ctx.markProcessingDone(phoneNumber);
   }
 };
