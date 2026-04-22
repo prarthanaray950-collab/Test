@@ -1,4 +1,7 @@
-const { getLiveMenu, getLivePlans, formatMenu, formatPlans, getTodayMenu } = require("./websiteApi");
+const websiteApi = require("./websiteApi");
+const { getLiveMenu, getLivePlans, formatMenu, formatPlans } = websiteApi;
+// getTodayMenu may not exist on older deployments — safe fallback
+const getTodayMenu = websiteApi.getTodayMenu || (() => Promise.resolve(null));
 
 const withTimeout = (p, ms) => Promise.race([p, new Promise((_,r) => setTimeout(() => r(new Error("timeout")), ms))]);
 
