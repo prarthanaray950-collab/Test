@@ -209,8 +209,30 @@ const startBot = async () => {
       for (const msg of messages) {
         if (msg.key.fromMe) continue;
         const jid = msg.key.remoteJid;
-        if (!jid || isJidGroup(jid)) continue;
         if (jid === "status@broadcast") continue;
+
+        // ── Group JID helper — log any group message so admin can copy the JID ──
+        // Send any message in your group, the bot will log the JID to console
+        // AND reply in the group with the JID so you can copy it easily.
+        if (isJidGroup(jid)) {
+          const text =
+            msg.message?.conversation ||
+            msg.message?.extendedTextMessage?.text || "";
+          if (text.toLowerCase().includes("jid") || text.toLowerCase().includes("group id")) {
+            console.log(`[GROUP JID] ${jid}`);
+            try {
+              await sock.sendMessage(jid, {
+                text: `This group JID is:\n${jid}\n\nCopy this and set it in your .env as STATUS_GROUP_JID or EVENTS_GROUP_JID`,
+              });
+            } catch (_) {}
+          } else {
+            // Always log group JIDs to console silently so you can find them
+            console.log(`[GROUP MSG] JID: ${jid} | From: ${msg.pushName || "?"} | Text: ${text.slice(0, 40)}`);
+          }
+          continue; // don't process group messages as customer messages
+        }
+
+        if (!jid) continue;
 
         // Deduplicate by message ID
         const msgId = msg.key.id;
