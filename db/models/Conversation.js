@@ -25,6 +25,7 @@ const conversationSchema = new mongoose.Schema({
     lastOrderAt:  { type: Date },
     lastPlanSeen: { type: String, default: "" },
     healthNotes:  { type: String, default: "" },
+    adminNote:    { type: String, default: "" }, // internal admin note, never shown to customer
   },
 
   createdAt: { type: Date, default: Date.now },
