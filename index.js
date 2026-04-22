@@ -11,6 +11,7 @@ const { useMongoAuthState } = require("./db/mongoAuthState");
 const connectDB             = require("./db/connect");
 const { handleMessage }     = require("./bot/messageHandler");
 const admin                 = require("./bot/adminNotifier");
+const scheduler             = require("./bot/scheduler");
 const Conversation          = require("./db/models/Conversation");
 
 const express = require("express");
@@ -200,6 +201,8 @@ const startBot = async () => {
         isConnecting = false;
         console.log("[Baileys] ✅ Connected to WhatsApp!");
         admin.setSocket(sock);
+        scheduler.setSocket(sock);
+        scheduler.start();
         await admin.notifyBotOnline();
       }
     });
@@ -257,6 +260,12 @@ const startBot = async () => {
         // ── Admin WhatsApp commands (DM from admin number) ──────────────────
         // Log every DM so you can see the exact JID format in Render logs
         console.log(`[MSG] JID: ${jid} | isAdmin: ${admin.isAdminJid(jid)} | text: ${text.slice(0,40)}`);
+
+        // If this is a LID JID, try to learn it as the admin LID
+        // The first @lid message that sends a ! command gets registered as admin
+        if (jid.endsWith("@lid") && text.trim().startsWith("!")) {
+          admin.learnAdminLid(jid);
+        }
 
         if (admin.isAdminJid(jid)) {
           const handled = await admin.handleAdminCommand(text.trim()).catch(e => {
