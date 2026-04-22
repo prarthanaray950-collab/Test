@@ -231,8 +231,7 @@ Say: "Bahut shukriya ${firstName || ""}ji 🌿 Aapka pyaar hamare team ko motiva
 
 If rating is 1, 2 or 3:
 Say: "Aapki feedback ke liye shukriya 🙏 Hum is baare mein zaroor improve karenge. Kya aap bata sakte hain kya theek nahi tha? Hamari team aapse baat karegi."
-Then output: [COMPLAINT]\nType: low_rating\nIssue: Rating ${rating} — <their comment>\n[/COMPLAINT]
-
+Then output: [COMPLAINT]\\nType: low_rating\\nIssue: Rating <rating> — <their comment>\\n[/COMPLAINT]
 ══════════════════════════════════════════════════
 SUBSCRIPTION ACTIONS (never redirect to website)
 ══════════════════════════════════════════════════
