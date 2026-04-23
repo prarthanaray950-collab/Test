@@ -58,7 +58,14 @@ const handleMessage = async (sock, rawJid, userText, pushName = "") => {
   console.log(`[IN]  ${phoneNumber}: ${userText.slice(0,80)}`);
 
   if (admin.isBlocked(phoneNumber)) { console.log(`[BLOCKED] ${phoneNumber}`); return; }
-  if (ctx.isAlreadyProcessing(phoneNumber)) { console.warn(`[SKIP] ${phoneNumber}: processing`); return; }
+
+  // Queue-based flow: if already processing, enqueue and return.
+  // The processQueue loop will pick it up immediately after current message finishes.
+  if (ctx.isAlreadyProcessing(phoneNumber)) {
+    ctx.enqueue(phoneNumber, { sock, rawJid, userText, pushName });
+    console.log(`[QUEUED] ${phoneNumber}: "${userText.slice(0,40)}"`);
+    return;
+  }
   ctx.markProcessingStart(phoneNumber);
 
   try {
@@ -355,6 +362,16 @@ const handleMessage = async (sock, rawJid, userText, pushName = "") => {
     });
   } finally {
     ctx.markProcessingDone(phoneNumber);
+    // Process next queued message for this phone if any
+    if (ctx.hasQueued(phoneNumber)) {
+      const next = ctx.dequeue(phoneNumber);
+      if (next) {
+        setImmediate(() =>
+          handleMessage(next.sock, next.rawJid, next.userText, next.pushName)
+            .catch(e => console.error(`[QUEUE_ERR] ${phoneNumber}: ${e.message}`))
+        );
+      }
+    }
   }
 };
 
