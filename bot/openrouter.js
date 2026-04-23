@@ -15,10 +15,11 @@
 
 const getSystemPrompt = require("./systemPrompt");
 
-const TIMEOUT_MS  = 20000; // 20 seconds — if model doesn't respond, try fallback
+const TIMEOUT_MS  = 15000; // 15 seconds per attempt
 const FALLBACKS   = [
   "meta-llama/llama-3.3-70b-instruct:free",
   "mistralai/mistral-7b-instruct:free",
+  "mistralai/mistral-small:free",
   "qwen/qwen-2-7b-instruct:free",
 ];
 
