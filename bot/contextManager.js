@@ -9,10 +9,35 @@ const normalizePhone = (raw) => {
   return digits.slice(-10);
 };
 
-const _processing = new Set();
-const isAlreadyProcessing = (p) => _processing.has(p);
-const markProcessingStart = (p) => _processing.add(p);
-const markProcessingDone  = (p) => _processing.delete(p);
+// ── Per-phone message queue ────────────────────────────────────────────────────
+// Instead of dropping messages that arrive while bot is busy,
+// we queue them and process in order. This prevents "stops replying"
+// when user sends two messages quickly.
+const _queues    = new Map(); // phone -> [{ text, rawJid, pushName, sock }]
+const _busy      = new Set(); // phones currently being processed
+
+const isAlreadyProcessing = (phone) => _busy.has(phone);
+const markProcessingStart = (phone) => _busy.add(phone);
+const markProcessingDone  = (phone) => _busy.delete(phone);
+
+// Enqueue a message. Returns true if it was queued (caller should not process immediately).
+const enqueue = (phone, item) => {
+  if (!_queues.has(phone)) _queues.set(phone, []);
+  _queues.get(phone).push(item);
+};
+
+// Dequeue next message for this phone. Returns item or null.
+const dequeue = (phone) => {
+  const q = _queues.get(phone);
+  if (!q || !q.length) return null;
+  const item = q.shift();
+  if (q.length === 0) _queues.delete(phone);
+  return item;
+};
+
+const hasQueued = (phone) => (_queues.get(phone)?.length || 0) > 0;
+
+// ── Core DB helpers ───────────────────────────────────────────────────────────
 
 const getHistoryAndProfile = async (phoneNumber) => {
   const phone = normalizePhone(phoneNumber);
@@ -21,7 +46,7 @@ const getHistoryAndProfile = async (phoneNumber) => {
     return {
       history:   doc?.history?.slice(-HISTORY_LIMIT) || [],
       profile:   doc?.profile || {},
-      isNewUser: !doc,                             // true if first ever message
+      isNewUser: !doc,
       createdAt: doc?.createdAt || null,
     };
   } catch (e) {
@@ -95,51 +120,39 @@ const trimHistoryAfterOrder = async (phoneNumber) => {
   } catch (e) { console.error("[CTX] trimHistoryAfterOrder:", e.message); }
 };
 
-// Get all customers whose subscription ends within N days (for reminders)
 const getExpiringSubscriptions = async (withinDays = 2) => {
-  const now    = new Date();
-  const cutoff = new Date(now.getTime() + withinDays * 24 * 60 * 60 * 1000);
+  const now = new Date(), cutoff = new Date(now.getTime() + withinDays * 86400000);
   try {
-    return await Conversation.find({
-      "profile.subscriptionEndAt": { $gte: now, $lte: cutoff },
-    }, { phoneNumber: 1, "profile.name": 1, "profile.subscriptionEndAt": 1 }).lean();
+    return await Conversation.find(
+      { "profile.subscriptionEndAt": { $gte: now, $lte: cutoff } },
+      { phoneNumber: 1, "profile.name": 1, "profile.subscriptionEndAt": 1 }
+    ).lean();
   } catch (e) { return []; }
 };
 
-// Get customers who received their last delivery >2 hours ago but haven't been asked for feedback today
 const getPendingFeedback = async () => {
-  const twoHoursAgo  = new Date(Date.now() - 2 * 60 * 60 * 1000);
-  const todayStart   = new Date(); todayStart.setHours(0,0,0,0);
+  const twoHoursAgo = new Date(Date.now() - 2*60*60*1000);
+  const todayStart  = new Date(); todayStart.setHours(0,0,0,0);
   try {
     return await Conversation.find({
-      "profile.lastOrderAt":   { $lte: twoHoursAgo },
-      "profile.totalOrders":   { $gt: 0 },
-      $or: [
-        { "profile.lastFeedbackAt": { $lt: todayStart } },
-        { "profile.lastFeedbackAt": null },
-      ],
+      "profile.lastOrderAt": { $lte: twoHoursAgo },
+      "profile.totalOrders": { $gt: 0 },
+      $or: [{ "profile.lastFeedbackAt": { $lt: todayStart } }, { "profile.lastFeedbackAt": null }],
     }, { phoneNumber: 1, "profile.name": 1 }).lean();
   } catch (e) { return []; }
 };
 
-// Get all customers (for broadcast)
 const getAllPhones = async () => {
   try {
-    const all = await Conversation.find({}, { phoneNumber: 1 }).lean();
-    return all.map(d => d.phoneNumber).filter(Boolean);
+    return (await Conversation.find({}, { phoneNumber: 1 }).lean()).map(d => d.phoneNumber).filter(Boolean);
   } catch (e) { return []; }
 };
 
 module.exports = {
   normalizePhone,
   isAlreadyProcessing, markProcessingStart, markProcessingDone,
-  getHistoryAndProfile,
-  appendExchange,
-  updateProfile,
-  savePushNameIfNew,
-  recordOrder,
-  trimHistoryAfterOrder,
-  getExpiringSubscriptions,
-  getPendingFeedback,
-  getAllPhones,
+  enqueue, dequeue, hasQueued,
+  getHistoryAndProfile, appendExchange, updateProfile,
+  savePushNameIfNew, recordOrder, trimHistoryAfterOrder,
+  getExpiringSubscriptions, getPendingFeedback, getAllPhones,
 };
