@@ -95,8 +95,11 @@ const handleMessage = async (sock, rawJid, userText, pushName = "") => {
     const greetRegex = /^(hi+|hello+|hey+|namaste|helo|start|menu|help|hii+|kya hai|who are you|kon ho)[\s!?.]*$/i;
     if (greetRegex.test(userText.trim())) {
       const logoUrl = process.env.LOGO_URL || "";
-      if (logoUrl) {
-        try { await sock.sendMessage(rawJid, { image: { url: logoUrl }, caption: "" }); } catch (_) {}
+      if (logoUrl && /[.](jpg|jpeg|png|webp|gif)(\?|$)/i.test(logoUrl)) {
+        try { await sock.sendMessage(rawJid, { image: { url: logoUrl }, caption: "" }); }
+        catch (e) { console.warn("[LOGO] Send failed:", e.message); }
+      } else if (logoUrl) {
+        console.warn("[LOGO] Not a direct image URL — use .jpg/.png link. Current: " + logoUrl);
       }
       const isRet = (profile.totalOrders || 0) > 0;
       const fname = profile.name ? profile.name.split(" ")[0] : null;
@@ -146,8 +149,12 @@ const handleMessage = async (sock, rawJid, userText, pushName = "") => {
       return;
     }
 
+    // Show typing indicator while AI thinks
+    try { await sock.sendPresenceUpdate("composing", rawJid); } catch (_) {}
+
     let aiReply = await chat(userText, history, profile, null, isNewUser);
     console.log(`[AI]  ${phoneNumber}: ${aiReply.slice(0,100)}`);
+    try { await sock.sendPresenceUpdate("available", rawJid); } catch (_) {}
 
     if (hasBlock(aiReply, "FETCH_ACCOUNT")) {
       const accountData = await fetchAccountData(phoneNumber, profile);
@@ -160,10 +167,11 @@ const handleMessage = async (sock, rawJid, userText, pushName = "") => {
     // ── SEND WELCOME IMAGE ─────────────────────────────────────────────────
     if (hasBlock(aiReply, "SEND_WELCOME")) {
       const logoUrl = process.env.LOGO_URL || "";
-      if (logoUrl) {
-        try {
-          await sock.sendMessage(rawJid, { image: { url: logoUrl }, caption: "" });
-        } catch (_) {}
+      if (logoUrl && /[.](jpg|jpeg|png|webp|gif)(\?|$)/i.test(logoUrl)) {
+        try { await sock.sendMessage(rawJid, { image: { url: logoUrl }, caption: "" }); }
+        catch (e) { console.warn("[LOGO] Send failed:", e.message); }
+      } else if (logoUrl) {
+        console.warn("[LOGO] Not a direct image URL — use .jpg/.png link.");
       }
       await ctx.updateProfile(phoneNumber, { firstMessageSent: true });
     }
