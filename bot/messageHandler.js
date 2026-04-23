@@ -91,6 +91,61 @@ const handleMessage = async (sock, rawJid, userText, pushName = "") => {
       return;
     }
 
+    // ── Direct greeting handler — bypasses AI, sends welcome instantly ────────
+    const greetRegex = /^(hi+|hello+|hey+|namaste|helo|start|menu|help|hii+|kya hai|who are you|kon ho)[\s!?.]*$/i;
+    if (greetRegex.test(userText.trim())) {
+      const logoUrl = process.env.LOGO_URL || "";
+      if (logoUrl) {
+        try { await sock.sendMessage(rawJid, { image: { url: logoUrl }, caption: "" }); } catch (_) {}
+      }
+      const isRet = (profile.totalOrders || 0) > 0;
+      const fname = profile.name ? profile.name.split(" ")[0] : null;
+      const gname = fname ? fname + " ji" : null;
+      const welcomeText = isRet
+        ? "Namaste" + (gname ? ", " + gname : "") + "! Wapas aaye — swagat hai \uD83C\uDF3F\n\n" +
+          (profile.lastOrderItems ? "Aapka last order tha: " + profile.lastOrderItems + ". Dobara order karein?\n\n" : "") +
+          "Aaj main kya kar sakta hoon:\n\n" +
+          "1. Same order repeat karein\n" +
+          "2. Aaj ka menu dekhein\n" +
+          "3. Daily tiffin order karein (Rs.80/plate)\n" +
+          "4. Monthly plan details\n" +
+          "5. Mere orders aur account info\n" +
+          "6. Subscription manage karein (pause/resume/cancel)\n" +
+          "7. Offers aur discounts\n" +
+          "8. Owner se baat karein\n\n" +
+          "Bas number bhejein ya seedha poochiye \uD83C\uDF3F"
+        : "Namaste" + (gname ? ", " + gname : "") + "! SatvikMeals mein aapka swagat hai \uD83C\uDF3F\n\n" +
+          "Patna ka trusted pure vegetarian meal service. Ghar jaisa khana, fresh ingredients, daily delivery.\n\n" +
+          "Main aapki kya madad kar sakta hoon:\n\n" +
+          "1. Aaj ka menu dekhein\n" +
+          "2. Daily tiffin order karein (Rs.80/plate)\n" +
+          "3. Monthly plan lein\n" +
+          "4. Delivery availability check karein\n" +
+          "5. Mere orders aur account info\n" +
+          "6. Subscription manage karein\n" +
+          "7. Offers aur discounts\n" +
+          "8. Owner se baat karein\n\n" +
+          "Bas number bhejein ya seedha apna sawaal poochiye \uD83C\uDF3F";
+      await ctx.appendExchange(phoneNumber, userText, welcomeText);
+      await ctx.updateProfile(phoneNumber, { firstMessageSent: true });
+      await sock.sendMessage(rawJid, { text: welcomeText });
+      console.log("[WELCOME] Sent to " + phoneNumber);
+      return;
+    }
+
+    // ── Menu choice 7 (offers) — handle directly ────────────────────────────
+    if (/^7[\s.]*$/.test(userText.trim())) {
+      const offersText =
+        "SatvikMeals ke current offers \uD83C\uDF3F\n\n" +
+        "1. Loyalty Coins: Har order pe coins earn karein — 1 coin = Rs.1 off (max 50%)\n" +
+        "2. Referral: Dost ko refer karein, aapko aur unhe 100 coins milenge\n" +
+        "3. Monthly plan: Free delivery + best value per meal\n\n" +
+        "Coins balance dekhne ke liye option 5 bhejein \uD83C\uDF3F";
+      await ctx.appendExchange(phoneNumber, userText, offersText);
+      await sock.sendMessage(rawJid, { text: offersText });
+      return;
+    }
+
     let aiReply = await chat(userText, history, profile, null, isNewUser);
     console.log(`[AI]  ${phoneNumber}: ${aiReply.slice(0,100)}`);
 
