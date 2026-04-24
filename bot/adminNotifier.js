@@ -1,532 +1,474 @@
 /**
  * adminNotifier.js
  *
- * FULL WHATSAPP ADMIN PANEL
- * Message the bot from your ADMIN_WHATSAPP number to control everything.
+ * TWO GROUPS:
+ *   STATUS_GROUP_JID  = bot online/offline (low noise)
+ *   EVENTS_GROUP_JID  = all business events AND admin command panel
  *
- * ─── COMMANDS ───────────────────────────────────────────────────────────────
+ * ADMIN COMMANDS work from:
+ *   1. Your personal DM to the bot
+ *   2. Any message in EVENTS_GROUP starting with !
+ *   3. Any @lid JID that sends a ! command (auto-learns as admin)
  *
- * HELP & INFO:
+ * COMMANDS:
  *   !help                        — show all commands
- *   !stats                       — total customers, orders, active today
- *   !customers                   — list all customers with name + phone
- *   !customer 9876543210         — full profile of one customer
- *   !history 9876543210          — last 10 messages of a customer
- *   !search <name or phone>      — find customer by name or partial number
- *
- * MESSAGING:
- *   !broadcast <message>         — send to ALL customers
- *   !send 9876543210 <message>   — send to one specific number
- *   !reply 9876543210 <message>  — same as !send (alias)
- *
- * MANAGEMENT:
- *   !note 9876543210 <note>      — add internal note to customer profile
- *   !clear 9876543210            — clear chat history of a customer (keeps profile)
- *   !block 9876543210            — block a customer from bot responses
- *   !unblock 9876543210          — unblock a customer
- *
- * BOT CONTROL:
- *   !status                      — bot uptime and connection status
- *   !ping                        — check if bot is alive
- *
- * ─── GROUPS ─────────────────────────────────────────────────────────────────
- *   STATUS_GROUP_JID  — bot online/offline/errors (low noise)
- *   EVENTS_GROUP_JID  — new customers, orders, subscriptions, complaints
+ *   !stats                       — customer & order summary
+ *   !customers                   — list all customers
+ *   !customer 9876543210         — full profile
+ *   !history 9876543210          — last 10 messages
+ *   !search <name/number>        — find customer
+ *   !broadcast <msg>             — send text to ALL customers
+ *   !broadcastimg <url> <caption>— send image to all customers
+ *   !send 9876543210 <msg>       — send text to one number
+ *   !sendimg 9876543210 <url>    — send image to one number
+ *   !note 9876543210 <note>      — add admin note
+ *   !clear 9876543210            — clear chat history
+ *   !block 9876543210            — block customer
+ *   !unblock 9876543210          — unblock customer
+ *   !unfreeze 9876543210         — return to bot after owner transfer
+ *   !remind                      — run subscription reminders now
+ *   !feedback                    — run feedback collection now
+ *   !offer <msg>                 — send promotional offer to all
+ *   !status                      — bot uptime
+ *   !ping                        — alive check
  */
 
 const axios = require("axios");
 
-let _sock = null;
-let _Conversation = null;
+let _sock             = null;
+let _Conversation     = null;
+let _adminLid         = null;   // learned at runtime, lost on restart (use ADMIN_LID env to persist)
 
 const ADMIN_PHONE  = () => (process.env.ADMIN_WHATSAPP || "").replace(/\D/g, "").slice(-10);
-const STATUS_GROUP = () => process.env.STATUS_GROUP_JID;
-const EVENTS_GROUP = () => process.env.EVENTS_GROUP_JID;
-const TG_TOKEN     = () => process.env.TELEGRAM_BOT_TOKEN;
-const TG_CHAT      = () => process.env.TELEGRAM_CHAT_ID;
+const STATUS_GROUP = () => process.env.STATUS_GROUP_JID  || "";
+const EVENTS_GROUP = () => process.env.EVENTS_GROUP_JID  || "";
+const TG_TOKEN     = () => process.env.TELEGRAM_BOT_TOKEN || "";
+const TG_CHAT      = () => process.env.TELEGRAM_CHAT_ID   || "";
 
 const setSocket            = (sock)  => { _sock = sock; };
 const setConversationModel = (model) => { _Conversation = model; };
 
-// ── Core send helpers ─────────────────────────────────────────────────────────
-
+// ── Core send helpers ──────────────────────────────────────────────────────────
 const toStatusGroup = async (text) => {
-  const jid = STATUS_GROUP();
-  if (!_sock || !jid) return;
-  try { await _sock.sendMessage(jid, { text }); }
-  catch (e) { console.error("[StatusGroup]", e.message); }
+  if (!_sock || !STATUS_GROUP()) return;
+  try { await _sock.sendMessage(STATUS_GROUP(), { text }); } catch (e) { console.error("[StatusGroup]", e.message); }
 };
 
 const toEventsGroup = async (text) => {
-  const jid = EVENTS_GROUP();
-  if (!_sock || !jid) return;
-  try { await _sock.sendMessage(jid, { text }); }
-  catch (e) { console.error("[EventsGroup]", e.message); }
+  if (!_sock || !EVENTS_GROUP()) return;
+  try { await _sock.sendMessage(EVENTS_GROUP(), { text }); } catch (e) { console.error("[EventsGroup]", e.message); }
+};
+
+const toEventsGroupImage = async (url, caption) => {
+  if (!_sock || !EVENTS_GROUP()) return;
+  try { await _sock.sendMessage(EVENTS_GROUP(), { image: { url }, caption: caption || "" }); } catch (e) { console.error("[EventsGroupImg]", e.message); }
+};
+
+// Reply to wherever the admin command came from (group or DM)
+let _lastCommandSource = null; // jid of last command sender
+const replyToAdmin = async (text) => {
+  if (!_sock) return;
+  const targets = new Set();
+  const phone = ADMIN_PHONE();
+  if (phone) targets.add("91" + phone + "@s.whatsapp.net");
+  if (_lastCommandSource) targets.add(_lastCommandSource);
+  for (const jid of targets) {
+    try { await _sock.sendMessage(jid, { text }); } catch (e) { console.error("[AdminReply]", e.message); }
+  }
 };
 
 const toDM = async (text) => {
   const phone = ADMIN_PHONE();
   if (!_sock || !phone) return;
-  try { await _sock.sendMessage(`91${phone}@s.whatsapp.net`, { text }); }
-  catch (e) { console.error("[AdminDM]", e.message); }
+  try { await _sock.sendMessage("91" + phone + "@s.whatsapp.net", { text }); } catch (e) { console.error("[AdminDM]", e.message); }
 };
 
 const toTelegram = async (text) => {
   if (!TG_TOKEN() || !TG_CHAT()) return;
   try {
-    await axios.post(`https://api.telegram.org/bot${TG_TOKEN()}/sendMessage`, {
+    await axios.post("https://api.telegram.org/bot" + TG_TOKEN() + "/sendMessage", {
       chat_id: TG_CHAT(),
-      text: `[SatvikMeals]\n\n${text}`,
+      text: "[SatvikMeals]\n\n" + text,
     });
   } catch (e) { console.error("[Telegram]", e.message); }
 };
 
-// ── Bot online — 5-min cooldown, status group only ───────────────────────────
-let _lastOnlineAt = 0;
+// ── Is this JID an admin? ──────────────────────────────────────────────────────
+// Admin = personal DM from ADMIN_WHATSAPP phone number
+//       OR any message from EVENTS_GROUP (all members can use commands)
+//       OR a learned/configured @lid
+const isAdminJid = (jid) => {
+  // Events group members = admins
+  if (EVENTS_GROUP() && jid === EVENTS_GROUP()) return true;
 
+  const phone = ADMIN_PHONE();
+  if (jid.endsWith("@s.whatsapp.net") && phone) {
+    const stripped = jid.replace("@s.whatsapp.net", "").replace(/\D/g, "");
+    if (stripped === phone || stripped === "91" + phone) return true;
+  }
+
+  if (jid.endsWith("@lid")) {
+    const envLid = (process.env.ADMIN_LID || "").trim();
+    if (envLid && jid === envLid) return true;
+    if (_adminLid && jid === _adminLid) return true;
+  }
+
+  return false;
+};
+
+// Learn admin LID on first ! command from @lid
+const learnAdminLid = (jid) => {
+  if (!jid.endsWith("@lid")) return;
+  if (_adminLid === jid) return;
+  _adminLid = jid;
+  console.log("[Admin] LID learned: " + jid + " — add ADMIN_LID=" + jid + " to Render env to persist");
+  const envLid = (process.env.ADMIN_LID || "").trim();
+  if (!envLid) {
+    toDM("Admin LID detected: " + jid + "\n\nAdd to Render env to persist across restarts:\nADMIN_LID=" + jid).catch(() => {});
+  }
+};
+
+// ── Bot online ─────────────────────────────────────────────────────────────────
+let _lastOnlineAt = 0;
 const notifyBotOnline = async () => {
   const now = Date.now();
-  if (now - _lastOnlineAt < 5 * 60 * 1000) {
-    console.log("[Admin] Online notify skipped — cooldown");
-    return;
-  }
+  if (now - _lastOnlineAt < 5 * 60 * 1000) return;
   _lastOnlineAt = now;
   const ts = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
-  await toStatusGroup(`🟢 SatvikMeals Bot ONLINE\n🕐 ${ts}\n🌿 WhatsApp connected, MongoDB ready.`);
+  await toStatusGroup("🟢 SatvikMeals Bot ONLINE\n🕐 " + ts);
 };
 
-const notifyBotError = async (msg) => {
-  await toStatusGroup(`🔴 BOT ERROR\n\n${msg}`);
-};
-
-// ── Business event notifications — events group + Telegram ───────────────────
-
+// ── Business event notifications ───────────────────────────────────────────────
 const notifyNewUser = async ({ phoneNumber, name, phone }) => {
-  const text =
-    `👤 NEW CUSTOMER\n\n` +
-    `Name: ${name}\n` +
-    `WhatsApp: ${phoneNumber}\n` +
-    `Phone: ${phone || phoneNumber}\n` +
-    `Time: ${new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}`;
+  const text = "👤 NEW CUSTOMER\n\nName: " + name + "\nWhatsApp: " + phoneNumber + "\nPhone: " + (phone || phoneNumber) + "\nTime: " + new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
   await Promise.allSettled([toEventsGroup(text), toTelegram(text)]);
 };
 
 const notifySubscriptionInterest = async ({ phoneNumber, planName, customerName, address }) => {
-  const text =
-    `📋 NEW SUBSCRIPTION REQUEST\n\n` +
-    `👤 ${customerName || "Unknown"}\n` +
-    `📱 ${phoneNumber}\n` +
-    `📦 Plan: ${planName}\n` +
-    `📍 ${address || "Not given"}\n` +
-    `⚡ Action needed: confirm payment`;
+  const text = "📋 SUBSCRIPTION REQUEST\n\n👤 " + (customerName||"Unknown") + "\n📱 " + phoneNumber + "\n📦 " + planName + "\n📍 " + (address||"Not given") + "\n⚡ Action needed: confirm payment";
   await Promise.allSettled([toEventsGroup(text), toTelegram(text)]);
 };
 
 const notifyNewOrder = async ({ phoneNumber, customerName, address, item, amount }) => {
-  const text =
-    `🆕 NEW ORDER\n\n` +
-    `👤 ${customerName}\n` +
-    `📱 ${phoneNumber}\n` +
-    `🍱 ${item}\n` +
-    `💰 Rs. ${amount}\n` +
-    `📍 ${address || "Not given"}\n` +
-    `✅ Awaiting UPI — 6201276506`;
+  const text = "🆕 NEW ORDER\n\n👤 " + customerName + "\n📱 " + phoneNumber + "\n🍱 " + item + "\n💰 Rs." + amount + "\n📍 " + (address||"Not given") + "\n✅ Awaiting UPI — 6201276506";
   await Promise.allSettled([toEventsGroup(text), toTelegram(text)]);
 };
 
 const notifyComplaint = async ({ phoneNumber, type, issue }) => {
-  const text =
-    `⚠️ ${(type || "COMPLAINT").toUpperCase()}\n\n` +
-    `📱 ${phoneNumber}\n\n${issue}`;
+  const text = "⚠️ " + (type||"COMPLAINT").toUpperCase() + "\n\n📱 " + phoneNumber + "\n\n" + issue;
   await Promise.allSettled([toEventsGroup(text), toTelegram(text)]);
 };
 
 const notifyHealthNote = async ({ phoneNumber, note }) => {
-  const text = `🏥 HEALTH NOTE\n\n📱 ${phoneNumber}\n\n${note}`;
+  const text = "🏥 HEALTH NOTE\n\n📱 " + phoneNumber + "\n\n" + note;
   await Promise.allSettled([toEventsGroup(text), toTelegram(text)]);
 };
 
-// ── Broadcast engine ──────────────────────────────────────────────────────────
-
-const broadcast = async (phones, message) => {
+// ── Broadcast engine ───────────────────────────────────────────────────────────
+const broadcast = async (phones, message, mediaUrl) => {
   if (!_sock) throw new Error("Socket not ready");
   let sent = 0, failed = 0;
   for (const phone of phones) {
     try {
       const digits = String(phone).replace(/\D/g, "").slice(-10);
-      await _sock.sendMessage(`91${digits}@s.whatsapp.net`, { text: message });
+      const jid    = "91" + digits + "@s.whatsapp.net";
+      if (mediaUrl && /\.(jpg|jpeg|png|webp|gif)(\?|$)/i.test(mediaUrl)) {
+        await _sock.sendMessage(jid, { image: { url: mediaUrl }, caption: message || "" });
+      } else if (mediaUrl && /\.(mp4|mov|avi)(\?|$)/i.test(mediaUrl)) {
+        await _sock.sendMessage(jid, { video: { url: mediaUrl }, caption: message || "" });
+      } else {
+        await _sock.sendMessage(jid, { text: message });
+      }
       sent++;
       await new Promise(r => setTimeout(r, 1500));
     } catch (e) {
-      console.error(`[Broadcast] Failed ${phone}: ${e.message}`);
+      console.error("[Broadcast] Failed " + phone + ": " + e.message);
       failed++;
     }
   }
   return { sent, failed };
 };
 
-// ── Blocked customers set (in-memory, survives restarts via DB flag) ──────────
+// ── Blocked set ────────────────────────────────────────────────────────────────
 const _blocked = new Set();
-
 const isBlocked = (phone) => _blocked.has(phone);
 
-// ── Admin command handler ─────────────────────────────────────────────────────
+// ── Help text ──────────────────────────────────────────────────────────────────
+const HELP_TEXT =
+"📱 SATVIKMEALS ADMIN PANEL\n\n" +
+"INFO:\n" +
+"!stats — summary\n" +
+"!customers — all customers\n" +
+"!customer 9876543210 — one profile\n" +
+"!history 9876543210 — chat history\n" +
+"!search <name/number> — find customer\n\n" +
+"MESSAGING:\n" +
+"!broadcast <msg> — text to all\n" +
+"!broadcastimg <url> <caption> — image to all\n" +
+"!send 9876543210 <msg> — text to one\n" +
+"!sendimg 9876543210 <url> — image to one\n\n" +
+"MANAGEMENT:\n" +
+"!note 9876543210 <note> — add note\n" +
+"!clear 9876543210 — clear history\n" +
+"!block 9876543210 — block\n" +
+"!unblock 9876543210 — unblock\n" +
+"!unfreeze 9876543210 — return to bot\n\n" +
+"AUTOMATION:\n" +
+"!offer <msg> — offer to all\n" +
+"!remind — run reminders\n" +
+"!feedback — run feedback\n\n" +
+"BOT:\n" +
+"!status — uptime\n" +
+"!ping — alive check";
 
-const HELP_TEXT = `📱 SATVIKMEALS ADMIN PANEL
-
-INFO COMMANDS:
-!stats — customer & order summary
-!customers — list all customers
-!customer 9876543210 — one customer's full profile
-!history 9876543210 — their last 10 messages
-!search <name or number> — find a customer
-
-MESSAGING:
-!broadcast <msg> — send to all customers
-!send 9876543210 <msg> — send to one number
-
-MANAGEMENT:
-!note 9876543210 <note> — add note to profile
-!clear 9876543210 — clear chat history
-!block 9876543210 — block from bot
-!unblock 9876543210 — unblock
-
-BOT:
-!status — uptime info
-!ping — check bot is alive`;
-
-const handleAdminCommand = async (text) => {
+// ── Handle admin command ───────────────────────────────────────────────────────
+const handleAdminCommand = async (text, fromJid) => {
   if (!_Conversation) return false;
   const cmd = text.trim();
   if (!cmd.startsWith("!")) return false;
 
-  // ── !help ────────────────────────────────────────────────────────────────
-  if (/^!help$/i.test(cmd)) {
-    await toDM(HELP_TEXT);
-    return true;
-  }
+  // Track where to reply (DM or group)
+  if (fromJid) _lastCommandSource = fromJid;
 
-  // ── !ping ────────────────────────────────────────────────────────────────
   if (/^!ping$/i.test(cmd)) {
-    await toDM(`🟢 Bot is alive\nUptime: ${Math.floor(process.uptime() / 60)} minutes`);
+    await replyToAdmin("🟢 Bot alive\nUptime: " + Math.floor(process.uptime() / 60) + " min");
     return true;
   }
 
-  // ── !status ──────────────────────────────────────────────────────────────
+  if (/^!help$/i.test(cmd)) {
+    await replyToAdmin(HELP_TEXT);
+    return true;
+  }
+
   if (/^!status$/i.test(cmd)) {
-    const uptime = process.uptime();
-    const h = Math.floor(uptime / 3600);
-    const m = Math.floor((uptime % 3600) / 60);
+    const h = Math.floor(process.uptime() / 3600), m = Math.floor((process.uptime() % 3600) / 60);
     const total = await _Conversation.countDocuments().catch(() => "?");
-    await toDM(
-      `📊 BOT STATUS\n\n` +
-      `Uptime: ${h}h ${m}m\n` +
-      `Total customers: ${total}\n` +
-      `Memory: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB\n` +
-      `Time: ${new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}`
-    );
+    await replyToAdmin("📊 BOT STATUS\n\nUptime: " + h + "h " + m + "m\nCustomers: " + total + "\nMemory: " + Math.round(process.memoryUsage().heapUsed / 1024 / 1024) + "MB\nTime: " + new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }));
     return true;
   }
 
-  // ── !stats ───────────────────────────────────────────────────────────────
   if (/^!stats$/i.test(cmd)) {
     try {
-      const total      = await _Conversation.countDocuments();
-      const withOrders = await _Conversation.countDocuments({ "profile.totalOrders": { $gt: 0 } });
-      const withEmail  = await _Conversation.countDocuments({ "profile.email": { $ne: "" } });
-      const today      = new Date(); today.setHours(0, 0, 0, 0);
+      const total       = await _Conversation.countDocuments();
+      const withOrders  = await _Conversation.countDocuments({ "profile.totalOrders": { $gt: 0 } });
+      const withEmail   = await _Conversation.countDocuments({ "profile.email": { $nin: ["", null] } });
+      const today       = new Date(); today.setHours(0,0,0,0);
       const activeToday = await _Conversation.countDocuments({ updatedAt: { $gte: today } });
-      const recent = await _Conversation.find({}, { phoneNumber: 1, "profile.name": 1, "profile.totalOrders": 1, updatedAt: 1 })
-        .sort({ updatedAt: -1 }).limit(5).lean();
-
-      const lines = [
-        `📊 SATVIKMEALS STATS\n`,
-        `Total customers: ${total}`,
-        `Active today: ${activeToday}`,
-        `With orders: ${withOrders}`,
-        `Registered (email): ${withEmail}`,
-        `\nRecent (last 5):`,
-        ...recent.map((c, i) =>
-          `${i + 1}. ${c.profile?.name || "Unknown"} — ${c.phoneNumber} — ${c.profile?.totalOrders || 0} orders`
-        ),
-      ];
-      await toDM(lines.join("\n"));
-    } catch (e) {
-      await toDM(`Error: ${e.message}`);
-    }
+      const recent      = await _Conversation.find({}, { phoneNumber: 1, "profile.name": 1, "profile.totalOrders": 1, updatedAt: 1 }).sort({ updatedAt: -1 }).limit(5).lean();
+      const lines = ["📊 SATVIKMEALS STATS\n", "Total customers: " + total, "Active today: " + activeToday, "With orders: " + withOrders, "Registered (email): " + withEmail, "\nRecent 5:"];
+      recent.forEach((c, i) => lines.push((i+1) + ". " + (c.profile?.name||"Unknown") + " — " + c.phoneNumber + " — " + (c.profile?.totalOrders||0) + " orders"));
+      await replyToAdmin(lines.join("\n"));
+    } catch (e) { await replyToAdmin("Error: " + e.message); }
     return true;
   }
 
-  // ── !customers ───────────────────────────────────────────────────────────
   if (/^!customers$/i.test(cmd)) {
     try {
-      const all = await _Conversation.find({}, {
-        phoneNumber: 1, "profile.name": 1, "profile.email": 1,
-        "profile.totalOrders": 1, "profile.lastPlanSeen": 1, updatedAt: 1,
-      }).sort({ updatedAt: -1 }).lean();
-
-      if (!all.length) { await toDM("No customers yet."); return true; }
-
-      // Split into chunks of 20 to avoid WhatsApp message size limits
-      const chunks = [];
-      for (let i = 0; i < all.length; i += 20) chunks.push(all.slice(i, i + 20));
-
-      for (let ci = 0; ci < chunks.length; ci++) {
-        const lines = [`👥 CUSTOMERS (${ci * 20 + 1}–${ci * 20 + chunks[ci].length} of ${all.length}):\n`];
-        chunks[ci].forEach((c, i) => {
-          lines.push(
-            `${ci * 20 + i + 1}. ${c.profile?.name || "Unknown"}\n` +
-            `   📱 ${c.phoneNumber}` +
-            (c.profile?.email ? ` | 📧 ${c.profile.email}` : "") +
-            (c.profile?.totalOrders ? ` | 🛒 ${c.profile.totalOrders} orders` : "") +
-            (c.profile?.lastPlanSeen ? ` | 📦 ${c.profile.lastPlanSeen}` : "")
-          );
-        });
-        await toDM(lines.join("\n"));
+      const all = await _Conversation.find({}, { phoneNumber:1,"profile.name":1,"profile.email":1,"profile.totalOrders":1,"profile.lastPlanSeen":1,updatedAt:1 }).sort({ updatedAt: -1 }).lean();
+      if (!all.length) { await replyToAdmin("No customers yet."); return true; }
+      for (let i = 0; i < all.length; i += 20) {
+        const chunk = all.slice(i, i + 20);
+        const lines = ["👥 CUSTOMERS (" + (i+1) + "-" + (i+chunk.length) + " of " + all.length + "):\n"];
+        chunk.forEach((c, j) => lines.push((i+j+1) + ". " + (c.profile?.name||"Unknown") + " — " + c.phoneNumber + (c.profile?.email ? " | " + c.profile.email : "") + (c.profile?.totalOrders ? " | " + c.profile.totalOrders + " orders" : "")));
+        await replyToAdmin(lines.join("\n"));
         await new Promise(r => setTimeout(r, 500));
       }
-    } catch (e) {
-      await toDM(`Error: ${e.message}`);
-    }
+    } catch (e) { await replyToAdmin("Error: " + e.message); }
     return true;
   }
 
-  // ── !customer 9876543210 ─────────────────────────────────────────────────
   if (/^!customer\s+\d+/i.test(cmd)) {
     const phone = cmd.match(/\d{10}/)?.[0];
-    if (!phone) { await toDM("Format: !customer 9876543210"); return true; }
+    if (!phone) { await replyToAdmin("Format: !customer 9876543210"); return true; }
     try {
       const doc = await _Conversation.findOne({ phoneNumber: phone }).lean();
-      if (!doc) { await toDM(`No customer found for ${phone}`); return true; }
+      if (!doc) { await replyToAdmin("No customer found for " + phone); return true; }
       const p = doc.profile || {};
-      const lastSeen = doc.updatedAt ? new Date(doc.updatedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) : "?";
-      const joined   = doc.createdAt ? new Date(doc.createdAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) : "?";
-      await toDM(
-        `👤 CUSTOMER PROFILE\n\n` +
-        `Name: ${p.name || "Not set"}\n` +
-        `Phone: ${p.phone || phone}\n` +
-        `Email: ${p.email || "Not set"}\n` +
-        `Address: ${p.address || "Not set"}\n` +
-        `Total Orders: ${p.totalOrders || 0}\n` +
-        `Last Plan: ${p.lastPlanSeen || "None"}\n` +
-        `Health Notes: ${p.healthNotes || "None"}\n` +
-        `Linked User ID: ${p.linkedUserId || "Not registered"}\n` +
-        `Messages in history: ${doc.history?.length || 0}\n` +
-        `Joined: ${joined}\n` +
-        `Last active: ${lastSeen}\n` +
-        `Blocked: ${_blocked.has(phone) ? "Yes" : "No"}`
-      );
-    } catch (e) {
-      await toDM(`Error: ${e.message}`);
-    }
+      await replyToAdmin("👤 CUSTOMER PROFILE\n\nName: " + (p.name||"Not set") + "\nPhone: " + (p.phone||phone) + "\nEmail: " + (p.email||"Not set") + "\nAddress: " + (p.address||"Not set") + "\nOrders: " + (p.totalOrders||0) + "\nLast Plan: " + (p.lastPlanSeen||"None") + "\nHealth: " + (p.healthNotes||"None") + "\nMeal Pref: " + (p.mealPreference||"standard") + "\nNote: " + (p.adminNote||"None") + "\nMessages: " + (doc.history?.length||0) + "\nBlocked: " + (_blocked.has(phone) ? "Yes" : "No") + "\nTransferred: " + (p.isTransferred ? "Yes" : "No") + "\nJoined: " + new Date(doc.createdAt).toLocaleString("en-IN",{timeZone:"Asia/Kolkata"}) + "\nLast active: " + new Date(doc.updatedAt).toLocaleString("en-IN",{timeZone:"Asia/Kolkata"}));
+    } catch (e) { await replyToAdmin("Error: " + e.message); }
     return true;
   }
 
-  // ── !history 9876543210 ──────────────────────────────────────────────────
   if (/^!history\s+\d+/i.test(cmd)) {
     const phone = cmd.match(/\d{10}/)?.[0];
-    if (!phone) { await toDM("Format: !history 9876543210"); return true; }
+    if (!phone) { await replyToAdmin("Format: !history 9876543210"); return true; }
     try {
       const doc = await _Conversation.findOne({ phoneNumber: phone }).lean();
-      if (!doc || !doc.history?.length) {
-        await toDM(`No chat history for ${phone}`);
-        return true;
-      }
-      const last10 = doc.history.slice(-10);
-      const lines = [`💬 LAST ${last10.length} MESSAGES — ${doc.profile?.name || phone}\n`];
-      last10.forEach(m => {
-        const role = m.role === "user" ? "👤 Customer" : "🤖 Bot";
+      if (!doc?.history?.length) { await replyToAdmin("No history for " + phone); return true; }
+      const last = doc.history.slice(-10);
+      const lines = ["💬 LAST " + last.length + " MESSAGES — " + (doc.profile?.name||phone) + "\n"];
+      last.forEach(m => {
+        const role = m.role === "user" ? "👤" : "🤖";
         const ts   = m.timestamp ? new Date(m.timestamp).toLocaleTimeString("en-IN") : "";
-        lines.push(`${role} ${ts}:\n${m.content?.slice(0, 200) || ""}${m.content?.length > 200 ? "..." : ""}`);
+        lines.push(role + " " + ts + ":\n" + (m.content||"").slice(0, 200));
       });
-      await toDM(lines.join("\n\n"));
-    } catch (e) {
-      await toDM(`Error: ${e.message}`);
-    }
+      await replyToAdmin(lines.join("\n\n"));
+    } catch (e) { await replyToAdmin("Error: " + e.message); }
     return true;
   }
 
-  // ── !search <query> ──────────────────────────────────────────────────────
   if (/^!search\s+/i.test(cmd)) {
     const query = cmd.replace(/^!search\s+/i, "").trim();
-    if (!query) { await toDM("Format: !search name or partial number"); return true; }
     try {
-      const results = await _Conversation.find({
-        $or: [
-          { "profile.name":  { $regex: query, $options: "i" } },
-          { phoneNumber:     { $regex: query } },
-          { "profile.email": { $regex: query, $options: "i" } },
-        ],
-      }, { phoneNumber: 1, "profile.name": 1, "profile.email": 1, "profile.totalOrders": 1 })
-        .limit(10).lean();
-
-      if (!results.length) { await toDM(`No results for "${query}"`); return true; }
-      const lines = [`🔍 Search results for "${query}":\n`];
-      results.forEach((c, i) => {
-        lines.push(
-          `${i + 1}. ${c.profile?.name || "Unknown"} — ${c.phoneNumber}` +
-          (c.profile?.email ? ` — ${c.profile.email}` : "") +
-          (c.profile?.totalOrders ? ` — ${c.profile.totalOrders} orders` : "")
-        );
-      });
-      await toDM(lines.join("\n"));
-    } catch (e) {
-      await toDM(`Error: ${e.message}`);
-    }
+      const results = await _Conversation.find({ $or: [{ "profile.name": { $regex: query, $options: "i" } }, { phoneNumber: { $regex: query } }, { "profile.email": { $regex: query, $options: "i" } }] }, { phoneNumber:1,"profile.name":1,"profile.email":1,"profile.totalOrders":1 }).limit(10).lean();
+      if (!results.length) { await replyToAdmin("No results for \"" + query + "\""); return true; }
+      const lines = ["🔍 Results for \"" + query + "\":\n"];
+      results.forEach((c,i) => lines.push((i+1) + ". " + (c.profile?.name||"Unknown") + " — " + c.phoneNumber + (c.profile?.email ? " — " + c.profile.email : "") + (c.profile?.totalOrders ? " — " + c.profile.totalOrders + " orders" : "")));
+      await replyToAdmin(lines.join("\n"));
+    } catch (e) { await replyToAdmin("Error: " + e.message); }
     return true;
   }
 
-  // ── !note 9876543210 <note> ──────────────────────────────────────────────
   if (/^!note\s+\d+/i.test(cmd)) {
     const match = cmd.match(/^!note\s+(\d{10})\s+([\s\S]+)/i);
-    if (!match) { await toDM("Format: !note 9876543210 your note here"); return true; }
+    if (!match) { await replyToAdmin("Format: !note 9876543210 your note"); return true; }
     const [, phone, note] = match;
     try {
-      await _Conversation.findOneAndUpdate(
-        { phoneNumber: phone },
-        { $set: { "profile.adminNote": note, updatedAt: new Date() } }
-      );
-      await toDM(`✅ Note saved for ${phone}:\n"${note}"`);
-    } catch (e) {
-      await toDM(`Error: ${e.message}`);
-    }
+      await _Conversation.findOneAndUpdate({ phoneNumber: phone }, { $set: { "profile.adminNote": note, updatedAt: new Date() } });
+      await replyToAdmin("✅ Note saved for " + phone + ": \"" + note + "\"");
+    } catch (e) { await replyToAdmin("Error: " + e.message); }
     return true;
   }
 
-  // ── !clear 9876543210 ────────────────────────────────────────────────────
   if (/^!clear\s+\d+/i.test(cmd)) {
     const phone = cmd.match(/\d{10}/)?.[0];
-    if (!phone) { await toDM("Format: !clear 9876543210"); return true; }
+    if (!phone) { await replyToAdmin("Format: !clear 9876543210"); return true; }
     try {
-      await _Conversation.findOneAndUpdate(
-        { phoneNumber: phone },
-        { $set: { history: [], updatedAt: new Date() } }
-      );
-      await toDM(`✅ Chat history cleared for ${phone}. Profile kept intact.`);
-    } catch (e) {
-      await toDM(`Error: ${e.message}`);
-    }
+      await _Conversation.findOneAndUpdate({ phoneNumber: phone }, { $set: { history: [], updatedAt: new Date() } });
+      await replyToAdmin("✅ History cleared for " + phone);
+    } catch (e) { await replyToAdmin("Error: " + e.message); }
     return true;
   }
 
-  // ── !block 9876543210 ────────────────────────────────────────────────────
   if (/^!block\s+\d+/i.test(cmd)) {
     const phone = cmd.match(/\d{10}/)?.[0];
-    if (!phone) { await toDM("Format: !block 9876543210"); return true; }
+    if (!phone) { await replyToAdmin("Format: !block 9876543210"); return true; }
     _blocked.add(phone);
-    await toDM(`🚫 ${phone} is now blocked from bot responses.`);
+    await replyToAdmin("🚫 " + phone + " is now blocked.");
     return true;
   }
 
-  // ── !unblock 9876543210 ──────────────────────────────────────────────────
   if (/^!unblock\s+\d+/i.test(cmd)) {
     const phone = cmd.match(/\d{10}/)?.[0];
-    if (!phone) { await toDM("Format: !unblock 9876543210"); return true; }
+    if (!phone) { await replyToAdmin("Format: !unblock 9876543210"); return true; }
     _blocked.delete(phone);
-    await toDM(`✅ ${phone} is now unblocked.`);
+    await replyToAdmin("✅ " + phone + " is unblocked.");
     return true;
   }
 
-  // ── !send / !reply 9876543210 <message> ──────────────────────────────────
+  if (/^!unfreeze\s+\d+/i.test(cmd)) {
+    const phone = cmd.match(/\d{10}/)?.[0];
+    if (!phone) { await replyToAdmin("Format: !unfreeze 9876543210"); return true; }
+    try {
+      await _Conversation.findOneAndUpdate({ phoneNumber: phone }, { $set: { "profile.isTransferred": false, updatedAt: new Date() } });
+      await replyToAdmin("✅ " + phone + " returned to bot.");
+    } catch (e) { await replyToAdmin("Error: " + e.message); }
+    return true;
+  }
+
+  // !send 9876543210 message
   if (/^!(send|reply)\s+\d+/i.test(cmd)) {
     const match = cmd.match(/^!(send|reply)\s+(\d{10})\s+([\s\S]+)/i);
-    if (!match) { await toDM("Format: !send 9876543210 your message here"); return true; }
+    if (!match) { await replyToAdmin("Format: !send 9876543210 your message"); return true; }
     const [,, phone, message] = match;
     try {
-      await _sock.sendMessage(`91${phone}@s.whatsapp.net`, { text: message.trim() });
-      await toDM(`✅ Sent to ${phone}`);
-    } catch (e) {
-      await toDM(`❌ Failed: ${e.message}`);
-    }
+      await _sock.sendMessage("91" + phone + "@s.whatsapp.net", { text: message.trim() });
+      await replyToAdmin("✅ Sent to " + phone);
+    } catch (e) { await replyToAdmin("❌ Failed: " + e.message); }
     return true;
   }
 
-  // ── !broadcast <message> ─────────────────────────────────────────────────
+  // !sendimg 9876543210 https://url.com/img.jpg optional caption
+  if (/^!sendimg\s+\d+/i.test(cmd)) {
+    const parts = cmd.split(/\s+/);
+    const phone = parts[1];
+    const url   = parts[2];
+    const caption = parts.slice(3).join(" ");
+    if (!phone || !url) { await replyToAdmin("Format: !sendimg 9876543210 https://image.url caption here"); return true; }
+    try {
+      await _sock.sendMessage("91" + phone + "@s.whatsapp.net", { image: { url }, caption: caption || "" });
+      await replyToAdmin("✅ Image sent to " + phone);
+    } catch (e) { await replyToAdmin("❌ Failed: " + e.message); }
+    return true;
+  }
+
+  // !broadcast message
   if (/^!broadcast\s+/i.test(cmd)) {
     const message = cmd.replace(/^!broadcast\s+/i, "").trim();
-    if (!message) { await toDM("Format: !broadcast your message here"); return true; }
+    if (!message) { await replyToAdmin("Format: !broadcast your message"); return true; }
     try {
-      const all    = await _Conversation.find({}, { phoneNumber: 1 }).lean();
-      const phones = all.map(d => d.phoneNumber).filter(Boolean);
-      await toDM(`📢 Broadcasting to ${phones.length} customers... please wait.`);
+      const phones = await require("./contextManager").getAllPhones();
+      await replyToAdmin("📢 Broadcasting to " + phones.length + " customers...");
       const result = await broadcast(phones, message);
-      await toDM(`✅ Broadcast complete!\nSent: ${result.sent}\nFailed: ${result.failed}`);
-      await toEventsGroup(
-        `📢 BROADCAST SENT\n` +
-        `Message: "${message.slice(0, 100)}"\n` +
-        `Sent: ${result.sent} | Failed: ${result.failed}`
-      );
-    } catch (e) {
-      await toDM(`❌ Error: ${e.message}`);
-    }
+      await replyToAdmin("✅ Done! Sent: " + result.sent + " | Failed: " + result.failed);
+      await toEventsGroup("📢 BROADCAST SENT\n\"" + message.slice(0,80) + "\"\nSent: " + result.sent + " | Failed: " + result.failed);
+    } catch (e) { await replyToAdmin("❌ Error: " + e.message); }
     return true;
   }
 
-  // Unknown command
+  // !broadcastimg https://url.com/img.jpg caption here
+  if (/^!broadcastimg\s+/i.test(cmd)) {
+    const parts   = cmd.split(/\s+/);
+    const url     = parts[1];
+    const caption = parts.slice(2).join(" ");
+    if (!url) { await replyToAdmin("Format: !broadcastimg https://image.url caption here"); return true; }
+    try {
+      const phones = await require("./contextManager").getAllPhones();
+      await replyToAdmin("📢 Sending image to " + phones.length + " customers...");
+      const result = await broadcast(phones, caption, url);
+      await replyToAdmin("✅ Done! Sent: " + result.sent + " | Failed: " + result.failed);
+    } catch (e) { await replyToAdmin("❌ Error: " + e.message); }
+    return true;
+  }
+
+  // !offer message
+  if (/^!offer\s+/i.test(cmd)) {
+    const message = cmd.replace(/^!offer\s+/i, "").trim();
+    if (!message) { await replyToAdmin("Format: !offer your offer message"); return true; }
+    try {
+      const phones = await require("./contextManager").getAllPhones();
+      await replyToAdmin("🎉 Sending offer to " + phones.length + " customers...");
+      const result = await broadcast(phones, "🎉 Special Offer from SatvikMeals!\n\n" + message + "\n\nOrder: 6201276506");
+      await replyToAdmin("✅ Offer sent! Sent: " + result.sent + " | Failed: " + result.failed);
+    } catch (e) { await replyToAdmin("❌ Error: " + e.message); }
+    return true;
+  }
+
+  if (/^!remind$/i.test(cmd)) {
+    try {
+      const sched = require("./scheduler");
+      await replyToAdmin("Running reminders...");
+      await sched.runSubscriptionReminders();
+      await replyToAdmin("✅ Reminders done.");
+    } catch (e) { await replyToAdmin("Error: " + e.message); }
+    return true;
+  }
+
+  if (/^!feedback$/i.test(cmd)) {
+    try {
+      const sched = require("./scheduler");
+      await replyToAdmin("Running feedback collection...");
+      await sched.runFeedbackCollection();
+      await replyToAdmin("✅ Feedback requests sent.");
+    } catch (e) { await replyToAdmin("Error: " + e.message); }
+    return true;
+  }
+
   if (cmd.startsWith("!")) {
-    await toDM(`Unknown command. Send !help to see all commands.`);
+    await replyToAdmin("Unknown command. Send !help to see all commands.");
     return true;
   }
 
   return false;
-};
-
-// ── Check if a JID is the admin ───────────────────────────────────────────────
-const isAdminJid = (jid) => {
-  const phone = ADMIN_PHONE(); // always 10 digits after normalization
-  if (!phone) return false;
-
-  // WhatsApp sends two JID formats:
-  // 1. Normal: 919876543210@s.whatsapp.net
-  // 2. LID:    43761421836382@lid  (Linked Device ID — newer WhatsApp accounts)
-  // For @s.whatsapp.net we can extract the phone number and compare.
-  // For @lid we cannot extract the phone — so we store the LID on first match
-  // and compare against it on subsequent messages.
-
-  if (jid.endsWith("@s.whatsapp.net")) {
-    const stripped = jid.replace("@s.whatsapp.net", "").replace(/\D/g, "");
-    return stripped === phone || stripped === `91${phone}` || stripped === `0${phone}`;
-  }
-
-  if (jid.endsWith("@lid")) {
-    // If we have a stored admin LID, compare directly
-    if (_adminLid && jid === _adminLid) return true;
-    // We cannot verify LID against phone number — check env var for explicit LID
-    const envLid = (process.env.ADMIN_LID || "").trim();
-    if (envLid && jid === envLid) return true;
-  }
-
-  return false;
-};
-
-// Store admin LID once discovered so isAdminJid works on subsequent messages
-let _adminLid = null;
-
-const learnAdminLid = (jid) => {
-  if (jid.endsWith("@lid") && !_adminLid) {
-    _adminLid = jid;
-    console.log(`[Admin] LID learned: ${jid} — set ADMIN_LID=${jid} in .env to persist`);
-    toDM(`Admin LID detected: ${jid}\n\nTo persist this across restarts, add to your Render env:\nADMIN_LID=${jid}`).catch(() => {});
-  }
 };
 
 module.exports = {
-  setSocket,
-  setConversationModel,
-  isAdminJid,
-  learnAdminLid,
-  isBlocked,
+  setSocket, setConversationModel,
+  isAdminJid, learnAdminLid, isBlocked,
   handleAdminCommand,
-  toDM,
-  toStatusGroup,
-  toEventsGroup,
-  toTelegram,
+  toDM, toStatusGroup, toEventsGroup, toEventsGroupImage,
   notifyBotOnline,
-  notifyBotError,
-  notifyNewUser,
-  notifySubscriptionInterest,
-  notifyNewOrder,
-  notifyComplaint,
-  notifyHealthNote,
+  notifyNewUser, notifySubscriptionInterest, notifyNewOrder,
+  notifyComplaint, notifyHealthNote,
   broadcast,
 };
