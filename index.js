@@ -242,15 +242,34 @@ const startBot = async () => {
           // (so admin can test the bot from their own number)
         }
 
-        // ── PAYMENT SCREENSHOT ─────────────────────────────────────────────────
-        if (hasImage && !text.trim()) {
-          // Image with no caption — likely a payment screenshot
+        // ── PAYMENT SCREENSHOT / ANY IMAGE ─────────────────────────────────────
+        if (hasImage) {
           const phone = jid.replace("@s.whatsapp.net","").replace(/\D/g,"").slice(-10);
-          await admin.toEventsGroup("📸 PAYMENT SCREENSHOT RECEIVED\n\n📱 " + phone + "\n\nCheck WhatsApp for the screenshot. Verify and confirm manually.");
-          await admin.toDM("📸 PAYMENT SCREENSHOT from " + phone + "\n\nTo confirm: !send " + phone + " Aapka payment confirm ho gaya ✅ Subscription activate ho raha hai.");
-          try {
-            await sock.sendMessage(jid, { text: "Aapka payment screenshot mil gaya ✅ Hamari team verify karke 2-4 ghante mein activate kar degi. Ya call karein: 6201276506" });
-          } catch (_) {}
+          const evGrp = process.env.EVENTS_GROUP_JID || "";
+          // Forward the actual image to events group so admin can see it
+          if (evGrp && admin._sock) {
+            try {
+              const imgMsg = msg.message.imageMessage;
+              await sock.sendMessage(evGrp, {
+                forward: msg,
+                force: true,
+              });
+            } catch (_) {
+              // Fallback: just notify with text if forward fails
+              await admin.toEventsGroup("📸 PAYMENT SCREENSHOT from " + phone + "\n(Image in customer chat — check WhatsApp)");
+            }
+          }
+          await admin.toDM("📸 PAYMENT SCREENSHOT from " + phone + "\n\nTo confirm payment:\n!send " + phone + " Aapka payment confirm ho gaya ✅ Subscription 2-4 ghante mein activate ho jaayega.");
+          await admin.toEventsGroup("📸 SCREENSHOT RECEIVED\n📱 " + phone + "\nCaption: " + (text||"(no caption)") + "\n\nConfirm: !send " + phone + " Payment confirmed ✅");
+          // Save screenshot context to profile so AI knows about it
+          const { updateProfile } = require('./bot/contextManager');
+          await updateProfile(phone, {}).catch(()=>{});
+          // Acknowledge to customer
+          try { await sock.sendMessage(jid, { text: "Aapka payment screenshot mil gaya ✅ Hamari team verify karke 2-4 ghante mein activate kar degi. Urgent ho to call karein: 6201276506" }); } catch (_) {}
+          // Also process any caption text through the bot
+          if (text.trim()) {
+            handleMessage(sock, jid, text.trim(), pushName).catch(() => {});
+          }
           continue;
         }
 
