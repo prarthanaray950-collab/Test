@@ -37,7 +37,6 @@ const fetchAccountData = async (phoneNumber) => {
       orders:      Array.isArray(orders) ? orders : [],
       activePlan:         sub?.plan?.name || sub?.planName || user?.activePlan || null,
       subscriptionStatus: sub?.status || null,
-      subscriptionId:     sub?._id || sub?.id || null,
       coins:              user?.coins || user?.loyaltyCoins || 0,
       deliveryAddress:    sub?.deliveryAddress || user?.address || null,
       mealPreference:     sub?.mealPreference || null,
@@ -54,22 +53,13 @@ const fetchAccountData = async (phoneNumber) => {
 const formatOrdersReply = (accountData, profile) => {
   const name  = profile.name ? profile.name.split(" ")[0] + " ji" : "Aap";
   const coins = accountData.coins || 0;
-
   if (!accountData.orders || !accountData.orders.length) {
     const sub = accountData.activePlan;
     if (sub) {
-      return "\uD83D\uDCE6 " + name + " ka account\n\n" +
-        "Active Plan: " + sub + "\n" +
-        "Status: " + (accountData.subscriptionStatus || "Active") + "\n" +
-        "Loyalty Coins: " + coins + "\n\n" +
-        "Abhi tak koi single order nahi hai.\n\n" +
-        "1. Aaj ka tiffin order karein (Rs.80)\n" +
-        "2. Subscription details\n" +
-        "3. Back to menu";
+      return "\uD83D\uDCE6 " + name + " ka account\n\nActive Plan: " + sub + "\nStatus: " + (accountData.subscriptionStatus || "Active") + "\nLoyalty Coins: " + coins + "\n\nAbhi tak koi single order nahi hai.\n\n1. Aaj ka tiffin order karein (Rs.80)\n2. Subscription details\n3. Back to menu";
     }
     return "\uD83D\uDCE6 " + name + " ke orders\n\nAbhi tak koi order nahi hai.\n\nPehla order place karein:\n\n1. Daily tiffin (Rs.80/plate)\n2. Monthly plan dekhein\n3. Back to menu";
   }
-
   const lines = ["\uD83D\uDCE6 " + name + " ke orders (" + accountData.orders.length + ")"];
   if (accountData.activePlan) {
     lines.push("\nActive Plan: " + accountData.activePlan + " (" + (accountData.subscriptionStatus || "active") + ")");
@@ -97,76 +87,77 @@ const buildWelcome = (profile) => {
 
   if (isRet) {
     return greet + " Wapas aaye — swagat hai \uD83C\uDF3F\n\n" +
-      (profile.lastOrderItems ? "Last order: " + profile.lastOrderItems + ". Dobara order karein?\n\n" : "") +
+      (profile.lastOrderItems ? "Last order: " + profile.lastOrderItems + "\n\n" : "") +
       "Kya karna hai:\n\n" +
-      "1. Same order repeat karein\n" +
-      "2. Aaj ka menu dekhein\n" +
-      "3. Daily tiffin order (Rs.80/plate)\n" +
-      "4. Monthly plan details\n" +
-      "5. Mere orders aur account\n" +
-      "6. Subscription manage karein\n" +
-      "7. Offers aur coins\n" +
-      "8. Owner se baat karein\n\n" +
+      "1. Order karein\n" +
+      "2. Subscription\n" +
+      "3. Account & orders\n" +
+      "4. Support\n\n" +
       "Number bhejein ya seedha poochiye \uD83C\uDF3F";
   }
   return greet + " SatvikMeals mein swagat hai \uD83C\uDF3F\n\n" +
     "Patna ka trusted pure vegetarian meal service.\nGhar jaisa khana, fresh daily delivery.\n\n" +
     "Kya karna hai:\n\n" +
-    "1. Aaj ka menu dekhein\n" +
-    "2. Daily tiffin order (Rs.80/plate)\n" +
-    "3. Monthly plan lein\n" +
-    "4. Delivery check karein\n" +
-    "5. Mere orders aur account\n" +
-    "6. Subscription manage karein\n" +
-    "7. Offers aur coins\n" +
-    "8. Owner se baat karein\n\n" +
+    "1. Order karein\n" +
+    "2. Subscription\n" +
+    "3. Account & orders\n" +
+    "4. Support\n\n" +
     "Number bhejein ya seedha poochiye \uD83C\uDF3F";
 };
 
-// ── Confused user fallback ─────────────────────────────────────────────────────
-const CONFUSED_REPLY =
-  "Samajh nahi aaya, maafi chahta hoon \uD83C\uDF3F\n\n" +
-  "Yeh try karein:\n\n" +
-  "1. Aaj ka menu\n" +
-  "2. Order karein\n" +
-  "3. Monthly plans\n" +
-  "4. Mere orders\n" +
-  "5. Help\n\n" +
-  "Ya seedha call karein: 6201276506";
+// ── Level-2 menus ──────────────────────────────────────────────────────────────
+const MENU_L2 = {
+  "1": "Order options:\n\n1. Aaj ka menu dekhein\n2. Daily tiffin order (Rs.80/plate)\n3. Custom order\n4. Back",
+  "2": "Subscription options:\n\n1. Monthly plan lein\n2. Delivery check karein\n3. Plan pause/resume/cancel\n4. Plan change\n5. Back",
+  "3": "Account options:\n\n1. Mere orders dekhein\n2. Account info\n3. Address update karein\n4. Meal preference update\n5. Back",
+  "4": "Support options:\n\n1. Complaint ya feedback\n2. Callback request\n3. Offers aur coins\n4. Owner se baat karein\n5. Back",
+};
 
-// ── Instant reply map ──────────────────────────────────────────────────────────
+// ── Check if last bot message was asking for confirmation ───────────────────────
+// This prevents "Ha/Ok/Ji" from being intercepted by instant map during active flows
+const isAwaitingConfirmation = (history) => {
+  if (!history || !history.length) return false;
+  const lastBot = [...history].reverse().find(m => m.role === "assistant");
+  if (!lastBot) return false;
+  const t = (lastBot.content || "").toLowerCase();
+  return t.includes("confirm") || t.includes("confirm karte") || t.includes("theek hai?") ||
+         t.includes("sahi hai?") || t.includes("haan karein") || t.includes("register kar") ||
+         t.includes("order confirm") || t.includes("proceed") || t.includes("pakka");
+};
+
+// ── Instant reply map — only for standalone greetings/queries ─────────────────
 const buildInstantMap = (profile) => {
   const fname = profile.name ? profile.name.split(" ")[0] : null;
   const gn    = fname ? fname + " ji" : null;
   const me    = "Main SatvikMeals ka virtual representative Satvik hoon \uD83C\uDF3F Kya madad kar sakta hoon?";
-  const wait  = (gn ? gn + ", a" : "A") + "apke sawaal par kaam kar raha hoon \uD83C\uDF3F Ek moment...";
-  const yes   = (gn ? "Ji " + gn + "! " : "Ji! ") + "Kya kar sakta hoon?";
+  const wait  = (gn ? gn + ", aapke" : "Aapke") + " sawaal par kaam kar raha hoon \uD83C\uDF3F Ek moment...";
 
   return {
     "tum kaun ho": me, "tum koun ho": me, "tum kon ho": me, "aap kaun ho": me,
     "aap kaun hain": me, "aap kon ho": me, "who are you": me,
     "bot ho kya": me, "ai ho": me, "robot ho": me,
-    "kya hua": wait, "kya hoa": wait, "kya ho gaya": wait, "kuch bolo": (gn ? "Haan " + gn + ", kya chahiye?" : "Haan boliye \uD83C\uDF3F"),
+    "kya hua": wait, "kya hoa": wait, "kya ho gaya": wait,
+    "kuch bolo": (gn ? "Haan " + gn + ", kya chahiye?" : "Haan boliye \uD83C\uDF3F"),
     "bolo": (gn ? "Haan " + gn + ", kya chahiye?" : "Haan boliye \uD83C\uDF3F"),
     "btao": (gn ? "Haan " + gn + ", boliye." : "Haan boliye \uD83C\uDF3F"),
     "batao": (gn ? "Haan " + gn + ", boliye." : "Haan boliye \uD83C\uDF3F"),
     "bataiye": (gn ? "Haan " + gn + ", boliye." : "Haan boliye \uD83C\uDF3F"),
-    "ok": yes, "okay": yes, "ji": yes, "haan": yes, "ha": yes,
-    "theek hai": yes, "thik hai": yes, "acha": yes, "accha": yes,
     "thanks": "Shukriya \uD83C\uDF3F Aur koi madad ho to batayein.",
     "thank you": "Shukriya \uD83C\uDF3F",
     "shukriya": "Aapka bhi shukriya \uD83C\uDF3F",
     "dhanyavaad": "Aapka swagat hai \uD83C\uDF3F",
-    "bye": (gn ? "Khuda hafiz, " + gn + " \uD83C\uDF3F Kisi madad mein wapas aayein." : "Khuda hafiz \uD83C\uDF3F"),
+    "bye": (gn ? "Khuda hafiz, " + gn + " \uD83C\uDF3F" : "Khuda hafiz \uD83C\uDF3F"),
     "goodbye": (gn ? "Khuda hafiz, " + gn + " \uD83C\uDF3F" : "Khuda hafiz \uD83C\uDF3F"),
-    "7": "SatvikMeals ke current offers \uD83C\uDF3F\n\n1. Loyalty Coins: Har order pe earn karein — 1 coin = Rs.1 off (max 50%)\n2. Referral: Dost ko refer karein, 100 coins milenge aapko bhi\n3. Monthly plan: Free delivery + best value per meal\n\nCoins balance ke liye option 5 bhejein",
-    "8": null, // handled by AI (transfer to owner)
   };
 };
 
-const GREET_REGEX = /^(hi+|hello+|hey+|namaste|helo|start|menu|help|hii+|salam|assalam)[\s!?.]*$/i;
-const ORDERS_REGEX = /\b(order|orders|mera order|mere orders|see order|check order|order history|order dekhein|order dikhaiye|order dikhao|order status)\b/i;
-const LOGO_REGEX = /\.(jpg|jpeg|png|webp|gif)(\?|$)/i;
+// ── Confused fallback ──────────────────────────────────────────────────────────
+const CONFUSED_REPLY =
+  "Samajh nahi aaya \uD83C\uDF3F\n\nYeh try karein:\n\n1. Order karein\n2. Subscription\n3. Account & orders\n4. Support\n\nYa seedha call karein: 6201276506";
+
+const GREET_REGEX  = /^(hi+|hello+|hey+|namaste|helo|start|menu|help|hii+|salam|assalam)[\s!?.]*$/i;
+const ORDERS_REGEX = /\b(order|orders|mera order|mere orders|see order|check order|order history|order dekhein|order dikhao|order status)\b/i;
+const LOGO_REGEX   = /\.(jpg|jpeg|png|webp|gif)(\?|$)/i;
 
 // ── Main handler ───────────────────────────────────────────────────────────────
 const handleMessage = async (sock, rawJid, userText, pushName = "") => {
@@ -188,61 +179,68 @@ const handleMessage = async (sock, rawJid, userText, pushName = "") => {
     if (!profile.phone) { await ctx.updateProfile(phoneNumber, { phone: phoneNumber }); profile.phone = phoneNumber; }
     if (pushName && !profile.name) { await ctx.savePushNameIfNew(phoneNumber, pushName); profile.name = pushName; }
 
-    // ── Transferred to owner — forward to admin ───────────────────────────────
+    // ── Transferred to owner ─────────────────────────────────────────────────
     if (profile.isTransferred) {
       await ctx.appendExchange(phoneNumber, userText, "");
       await admin.toDM("\uD83D\uDCAC MSG FROM TRANSFERRED CUSTOMER\n\n\uD83D\uDC64 " + (profile.name || "Unknown") + " \u2014 " + phoneNumber + "\n\n" + userText);
       return;
     }
 
-    // ── Greeting \u2014 instant welcome, no AI ──────────────────────────────────────
+    // ── Greeting — instant welcome ───────────────────────────────────────────
     if (GREET_REGEX.test(userText.trim())) {
       const logoUrl = process.env.LOGO_URL || "";
       if (logoUrl && LOGO_REGEX.test(logoUrl)) {
-        try { await sock.sendMessage(rawJid, { image: { url: logoUrl }, caption: "" }); }
-        catch (e) { console.warn("[LOGO]", e.message); }
+        try { await sock.sendMessage(rawJid, { image: { url: logoUrl }, caption: "" }); } catch (_) {}
       }
       const welcome = buildWelcome(profile);
       await ctx.appendExchange(phoneNumber, userText, welcome);
       await ctx.updateProfile(phoneNumber, { firstMessageSent: true });
       await sock.sendMessage(rawJid, { text: welcome });
-      console.log("[WELCOME] " + phoneNumber);
       return;
     }
 
-    // ── Orders request \u2014 fetch and show directly ───────────────────────────────
-    if (ORDERS_REGEX.test(userText) || userText.trim() === "5") {
+    // ── Level-1 menu numbers (1-4) — only when NOT in a flow ─────────────────
+    const trimmed = userText.trim();
+    const awaiting = isAwaitingConfirmation(history);
+
+    if (!awaiting && MENU_L2[trimmed]) {
+      const reply = MENU_L2[trimmed];
+      await ctx.appendExchange(phoneNumber, userText, reply);
+      await sock.sendMessage(rawJid, { text: reply });
+      return;
+    }
+
+    // ── Orders request ───────────────────────────────────────────────────────
+    if (!awaiting && (ORDERS_REGEX.test(userText) || trimmed === "3" && !history.length)) {
       try { await sock.sendPresenceUpdate("composing", rawJid); } catch (_) {}
       const accountData = await fetchAccountData(phoneNumber);
       try { await sock.sendPresenceUpdate("available", rawJid); } catch (_) {}
       const reply = formatOrdersReply(accountData || { orders: [], totalOrders: 0, coins: 0 }, profile);
       await ctx.appendExchange(phoneNumber, userText, reply);
       await sock.sendMessage(rawJid, { text: reply });
-      console.log("[ORDERS] " + phoneNumber);
       return;
     }
 
-    // ── Instant replies \u2014 no AI ────────────────────────────────────────────────
-    const t = userText.trim().toLowerCase().replace(/[?!.,;]+$/, "").trim();
-    const instantMap = buildInstantMap(profile);
-    if (Object.prototype.hasOwnProperty.call(instantMap, t) && instantMap[t] !== null) {
-      const reply = instantMap[t];
-      await ctx.appendExchange(phoneNumber, userText, reply);
-      await sock.sendMessage(rawJid, { text: reply });
-      console.log("[INSTANT] " + phoneNumber + ": " + t);
-      return;
+    // ── Instant replies — only when NOT awaiting confirmation ─────────────────
+    if (!awaiting) {
+      const t = trimmed.toLowerCase().replace(/[?!.,;]+$/, "").trim();
+      const instantMap = buildInstantMap(profile);
+      if (Object.prototype.hasOwnProperty.call(instantMap, t)) {
+        const reply = instantMap[t];
+        await ctx.appendExchange(phoneNumber, userText, reply);
+        await sock.sendMessage(rawJid, { text: reply });
+        return;
+      }
     }
 
-    // ── AI call ───────────────────────────────────────────────────────────────
+    // ── AI call ──────────────────────────────────────────────────────────────
     try { await sock.sendPresenceUpdate("composing", rawJid); } catch (_) {}
 
     let aiReply;
     try {
       aiReply = await chat(userText, history, profile, null, isNewUser);
-      console.log("[AI]  " + phoneNumber + ": " + aiReply.slice(0, 100));
     } catch (aiErr) {
-      console.error("[AI ERR] " + phoneNumber + ": " + aiErr.message);
-      // Send confused fallback — don't crash the whole handler
+      console.error("[AI ERR]", phoneNumber, aiErr.message);
       try { await sock.sendPresenceUpdate("available", rawJid); } catch (_) {}
       await sock.sendMessage(rawJid, { text: CONFUSED_REPLY });
       await ctx.appendExchange(phoneNumber, userText, CONFUSED_REPLY);
@@ -251,8 +249,7 @@ const handleMessage = async (sock, rawJid, userText, pushName = "") => {
 
     if (hasBlock(aiReply, "FETCH_ACCOUNT")) {
       const accountData = await fetchAccountData(phoneNumber);
-      try { aiReply = await chat(userText, history, profile, accountData, isNewUser); }
-      catch (_) {} // use original reply if retry fails
+      try { aiReply = await chat(userText, history, profile, accountData, isNewUser); } catch (_) {}
     }
 
     try { await sock.sendPresenceUpdate("available", rawJid); } catch (_) {}
@@ -314,13 +311,14 @@ const handleMessage = async (sock, rawJid, userText, pushName = "") => {
     }
 
     const delivApproved = extractBlock(aiReply, "DELIVERY_APPROVED");
-    if (delivApproved) { const area = delivApproved.get("Area"); await ctx.updateProfile(phoneNumber, { deliveryZone: "approved" }); console.log("[DELIVERY] Approved: " + area); }
+    if (delivApproved) { await ctx.updateProfile(phoneNumber, { deliveryZone: "approved" }); }
 
     const delivCheck = extractBlock(aiReply, "DELIVERY_CHECK_NEEDED");
     if (delivCheck) {
       const area = delivCheck.get("Area");
       await ctx.updateProfile(phoneNumber, { deliveryZone: "pending_approval" });
-      await admin.toDM("\uD83D\uDCCD DELIVERY APPROVAL NEEDED\n\n\uD83D\uDC64 " + (profile.name||"Unknown") + " \u2014 " + phoneNumber + "\nArea: " + area + "\n\nApprove: !send " + phoneNumber + " Aapke area mein delivery available hai \u2705\nDecline: !send " + phoneNumber + " Aapke area mein abhi delivery available nahi hai.");
+      await admin.toDM("\uD83D\uDCCD DELIVERY APPROVAL NEEDED\n\n\uD83D\uDC64 " + (profile.name||"Unknown") + " \u2014 " + phoneNumber + "\nArea: " + area + "\n\nApprove: !send " + phoneNumber + " Aapke area mein delivery available hai \u2705\nDecline: !send " + phoneNumber + " Abhi available nahi hai.");
+      await admin.toEventsGroup("\uD83D\uDCCD DELIVERY CHECK: " + (profile.name||"Unknown") + " \u2014 " + area);
     }
 
     const transferBlock = extractBlock(aiReply, "TRANSFER_TO_OWNER");
@@ -393,7 +391,7 @@ const handleMessage = async (sock, rawJid, userText, pushName = "") => {
       await ctx.trimHistoryAfterOrder(phoneNumber);
     }
 
-    // ── Send reply (with retry on connection error) ───────────────────────────
+    // ── Send reply (with retry) ────────────────────────────────────────────────
     if (cleanedReply) {
       let sent = false;
       for (let attempt = 0; attempt < 3; attempt++) {
@@ -402,12 +400,12 @@ const handleMessage = async (sock, rawJid, userText, pushName = "") => {
           console.log("[OUT] " + phoneNumber + ": " + cleanedReply.slice(0, 80));
           sent = true;
           break;
-        } catch (sendErr) {
-          console.warn("[SEND RETRY " + (attempt+1) + "] " + phoneNumber + ": " + sendErr.message);
+        } catch (e) {
+          console.warn("[SEND RETRY " + (attempt+1) + "] " + phoneNumber + ": " + e.message);
           if (attempt < 2) await new Promise(r => setTimeout(r, 2000));
         }
       }
-      if (!sent) console.error("[SEND FAILED] " + phoneNumber + " — message lost after 3 attempts");
+      if (!sent) console.error("[SEND FAILED] " + phoneNumber);
     }
 
   } catch (err) {
