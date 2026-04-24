@@ -155,7 +155,7 @@ const buildInstantMap = (profile) => {
 const CONFUSED_REPLY =
   "Samajh nahi aaya \uD83C\uDF3F\n\nYeh try karein:\n\n1. Order karein\n2. Subscription\n3. Account & orders\n4. Support\n\nYa seedha call karein: 6201276506";
 
-const GREET_REGEX  = /^(hi+|hello+|hey+|namaste|helo|start|menu|help|hii+|salam|assalam)[\s!?.]*$/i;
+const GREET_REGEX  = /^(hi+|hello+|hey+|namaste|helo|start|menu|help|salam|assalam)[\s!?.]*$/i;
 const ORDERS_REGEX = /\b(order|orders|mera order|mere orders|see order|check order|order history|order dekhein|order dikhao|order status)\b/i;
 const LOGO_REGEX   = /\.(jpg|jpeg|png|webp|gif)(\?|$)/i;
 
@@ -199,11 +199,16 @@ const handleMessage = async (sock, rawJid, userText, pushName = "") => {
       return;
     }
 
-    // ── Level-1 menu numbers (1-4) — only when NOT in a flow ─────────────────
+// ── Level-1 menu numbers (1-4) — only when last bot msg was the main menu ─────
     const trimmed = userText.trim();
     const awaiting = isAwaitingConfirmation(history);
 
-    if (!awaiting && MENU_L2[trimmed]) {
+    // Only route 1-4 as main-menu shortcuts when the last bot message
+    // was the main/welcome menu — not when inside a sub-menu or AI flow.
+    const lastBotMsg = history.length ? [...history].reverse().find(m => m.role === "assistant")?.content || "" : "";
+    const isMainMenuActive = lastBotMsg.includes("1. Order karein") && lastBotMsg.includes("2. Subscription");
+
+    if (!awaiting && isMainMenuActive && MENU_L2[trimmed]) {
       const reply = MENU_L2[trimmed];
       await ctx.appendExchange(phoneNumber, userText, reply);
       await sock.sendMessage(rawJid, { text: reply });
