@@ -253,10 +253,35 @@ const handleAdminCommand = async (text, fromJid) => {
       const withOrders  = await _Conversation.countDocuments({ "profile.totalOrders": { $gt: 0 } });
       const withEmail   = await _Conversation.countDocuments({ "profile.email": { $nin: ["", null] } });
       const today       = new Date(); today.setHours(0,0,0,0);
+      const thisWeek    = new Date(Date.now() - 7*24*60*60*1000);
+      const thisMonth   = new Date(); thisMonth.setDate(1); thisMonth.setHours(0,0,0,0);
       const activeToday = await _Conversation.countDocuments({ updatedAt: { $gte: today } });
-      const recent      = await _Conversation.find({}, { phoneNumber: 1, "profile.name": 1, "profile.totalOrders": 1, updatedAt: 1 }).sort({ updatedAt: -1 }).limit(5).lean();
-      const lines = ["📊 SATVIKMEALS STATS\n", "Total customers: " + total, "Active today: " + activeToday, "With orders: " + withOrders, "Registered (email): " + withEmail, "\nRecent 5:"];
-      recent.forEach((c, i) => lines.push((i+1) + ". " + (c.profile?.name||"Unknown") + " — " + c.phoneNumber + " — " + (c.profile?.totalOrders||0) + " orders"));
+      const newThisWeek = await _Conversation.countDocuments({ createdAt: { $gte: thisWeek } });
+      const newThisMonth= await _Conversation.countDocuments({ createdAt: { $gte: thisMonth } });
+      // Total orders placed across all customers
+      const totalOrdersAgg = await _Conversation.aggregate([{ $group: { _id: null, total: { $sum: "$profile.totalOrders" } } }]);
+      const totalOrders = totalOrdersAgg[0]?.total || 0;
+      // Top customers by orders
+      const topCustomers = await _Conversation.find({ "profile.totalOrders": { $gt: 0 } }, { phoneNumber:1,"profile.name":1,"profile.totalOrders":1 }).sort({ "profile.totalOrders": -1 }).limit(5).lean();
+      const recent = await _Conversation.find({}, { phoneNumber:1,"profile.name":1,"profile.totalOrders":1,updatedAt:1 }).sort({ updatedAt: -1 }).limit(5).lean();
+      const lines = [
+        "📊 SATVIKMEALS ANALYTICS\n",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "CUSTOMERS:",
+        "Total: " + total,
+        "Active today: " + activeToday,
+        "New this week: " + newThisWeek,
+        "New this month: " + newThisMonth,
+        "Registered (email): " + withEmail,
+        "\nORDERS:",
+        "Customers with orders: " + withOrders,
+        "Total orders placed: " + totalOrders,
+        "Avg per customer: " + (withOrders ? (totalOrders/withOrders).toFixed(1) : "0"),
+        "\nTOP CUSTOMERS:",
+      ];
+      topCustomers.forEach((c,i) => lines.push((i+1) + ". " + (c.profile?.name||"Unknown") + " — " + c.phoneNumber + " — " + (c.profile?.totalOrders||0) + " orders"));
+      lines.push("\nRECENT ACTIVE:");
+      recent.forEach((c,i) => lines.push((i+1) + ". " + (c.profile?.name||"Unknown") + " — " + c.phoneNumber));
       await replyToAdmin(lines.join("\n"));
     } catch (e) { await replyToAdmin("Error: " + e.message); }
     return true;
