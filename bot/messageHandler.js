@@ -393,10 +393,21 @@ const handleMessage = async (sock, rawJid, userText, pushName = "") => {
       await ctx.trimHistoryAfterOrder(phoneNumber);
     }
 
-    // ── Send reply ─────────────────────────────────────────────────────────────
+    // ── Send reply (with retry on connection error) ───────────────────────────
     if (cleanedReply) {
-      await sock.sendMessage(rawJid, { text: cleanedReply });
-      console.log("[OUT] " + phoneNumber + ": " + cleanedReply.slice(0, 80));
+      let sent = false;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          await sock.sendMessage(rawJid, { text: cleanedReply });
+          console.log("[OUT] " + phoneNumber + ": " + cleanedReply.slice(0, 80));
+          sent = true;
+          break;
+        } catch (sendErr) {
+          console.warn("[SEND RETRY " + (attempt+1) + "] " + phoneNumber + ": " + sendErr.message);
+          if (attempt < 2) await new Promise(r => setTimeout(r, 2000));
+        }
+      }
+      if (!sent) console.error("[SEND FAILED] " + phoneNumber + " — message lost after 3 attempts");
     }
 
   } catch (err) {
