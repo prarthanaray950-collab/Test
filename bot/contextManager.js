@@ -9,15 +9,13 @@ const normalizePhone = (raw) => {
   return digits.slice(-10);
 };
 
-// ── Per-phone message queue ────────────────────────────────────────────────────
-// Instead of dropping messages that arrive while bot is busy,
-// we queue them and process in order. This prevents "stops replying"
-// when user sends two messages quickly.
-const _queues    = new Map(); // phone -> [{ text, rawJid, pushName, sock }]
-const _busy      = new Map(); // phone -> timestamp when processing started
-
-// Reduced from 45s → 20s so a crash/timeout doesn't block the user for long.
-const LOCK_TIMEOUT_MS = 20000;
+// ── Per-phone processing lock ─────────────────────────────────────────────────
+// LOCK_TIMEOUT_MS must be LONGER than the maximum possible AI call duration.
+// AI can try 4 models × 15s each + 3s delays = ~63s worst case.
+// Set to 90s so the lock never auto-expires mid-processing.
+// If a genuine crash happens, the lock will clear after 90s.
+const _busy = new Map(); // phone -> timestamp
+const LOCK_TIMEOUT_MS = 90000; // 90 seconds — longer than max AI time
 
 const isAlreadyProcessing = (phone) => {
   const ts = _busy.get(phone);
@@ -32,21 +30,19 @@ const isAlreadyProcessing = (phone) => {
 const markProcessingStart = (phone) => _busy.set(phone, Date.now());
 const markProcessingDone  = (phone) => _busy.delete(phone);
 
-// Enqueue a message. Silently drops it if an identical text is already
-// pending — this prevents WhatsApp's duplicate delivery from causing
-// double replies (the "only responds on second send" symptom).
+// ── Per-phone message queue ───────────────────────────────────────────────────
+const _queues = new Map(); // phone -> [{ sock, rawJid, userText, pushName }]
+
 const enqueue = (phone, item) => {
   if (!_queues.has(phone)) _queues.set(phone, []);
   const q = _queues.get(phone);
-  // Drop duplicate: same text already last in queue
+  // Drop if same text is already last in queue — prevents double-fire from WA duplicates
   if (q.length && q[q.length - 1].userText === item.userText) {
-    console.log("[CTX] Duplicate queued msg dropped for " + phone + ": " + item.userText.slice(0,30));
+    console.log("[CTX] Duplicate queued msg dropped: " + phone + " — " + item.userText.slice(0,30));
     return;
   }
   q.push(item);
 };
-
-// Dequeue next message for this phone. Returns item or null.
 const dequeue = (phone) => {
   const q = _queues.get(phone);
   if (!q || !q.length) return null;
@@ -54,8 +50,21 @@ const dequeue = (phone) => {
   if (q.length === 0) _queues.delete(phone);
   return item;
 };
-
 const hasQueued = (phone) => (_queues.get(phone)?.length || 0) > 0;
+
+// ── Recently-processed dedup ──────────────────────────────────────────────────
+// Tracks the last text processed per phone. If a queued duplicate fires right
+// after completion, it sees it was just handled and exits without replying.
+const _lastProcessed = new Map(); // phone -> { text, ts }
+const PROC_DEDUP_MS  = 8000; // 8s window — covers AI response + network time
+
+const wasJustProcessed = (phone, text) => {
+  const last = _lastProcessed.get(phone);
+  return !!(last && last.text === text && Date.now() - last.ts < PROC_DEDUP_MS);
+};
+const markJustProcessed = (phone, text) => {
+  _lastProcessed.set(phone, { text, ts: Date.now() });
+};
 
 // ── Core DB helpers ───────────────────────────────────────────────────────────
 
@@ -151,9 +160,6 @@ const getExpiringSubscriptions = async (withinDays = 2) => {
 };
 
 const getPendingFeedback = async () => {
-  // Find all customers who have ordered (any time) and haven't been asked for
-  // feedback today. We removed the lastOrderAt requirement because it's often
-  // null for subscription customers whose orders go through the website API.
   const todayStart = new Date(); todayStart.setHours(0,0,0,0);
   try {
     return await Conversation.find({
@@ -177,6 +183,7 @@ module.exports = {
   normalizePhone,
   isAlreadyProcessing, markProcessingStart, markProcessingDone,
   enqueue, dequeue, hasQueued,
+  wasJustProcessed, markJustProcessed,
   getHistoryAndProfile, appendExchange, updateProfile,
   savePushNameIfNew, recordOrder, trimHistoryAfterOrder,
   getExpiringSubscriptions, getPendingFeedback, getAllPhones,
