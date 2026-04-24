@@ -51,16 +51,14 @@ app.get("/", (_, res) => {
       ? `<p>📱 Open WhatsApp → Linked Devices → Link a Device</p><img src="${currentQR}" alt="Scan QR"/>`
       : botStatus === "ready"
       ? `<p style="color:#16a34a;font-size:1.3em;margin-top:8px">✅ Bot is LIVE!</p>`
-      : `<p style="color:#6b7280">⏳ Please wait — page auto-refreshes...</p>`}
+      : `<p style="color:#6b7280">⏳ Please wait...</p>`}
     <br>
     <a class="btn" href="/health">Health Check</a>
     <a class="btn sec" href="/api/clear-session">Clear Session</a>
   </body></html>`);
 });
 
-app.get("/health", (_, res) =>
-  res.json({ status: "ok", botStatus, uptime: Math.floor(process.uptime()), time: new Date() })
-);
+app.get("/health", (_, res) => res.json({ status: "ok", botStatus, uptime: Math.floor(process.uptime()), time: new Date() }));
 app.get("/status", (_, res) => res.json({ botStatus }));
 
 app.get("/api/clear-session", async (_, res) => {
@@ -69,66 +67,49 @@ app.get("/api/clear-session", async (_, res) => {
     const AuthModel = mongoose.models.BaileysAuth;
     if (AuthModel) {
       await AuthModel.deleteMany({});
-      currentQR = null;
-      botStatus = "starting";
-      res.json({ ok: true, message: "Session cleared. Restart the service for a new QR." });
+      currentQR = null; botStatus = "starting";
+      res.json({ ok: true, message: "Session cleared." });
     } else {
-      res.json({ ok: false, message: "AuthModel not ready yet." });
+      res.json({ ok: false, message: "AuthModel not ready." });
     }
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`[Server] Running on port ${PORT}`));
-
-process.on("unhandledRejection", (r) => console.error("[UnhandledRejection]", r));
-process.on("uncaughtException",  (e) => console.error("[UncaughtException]", e.message));
-
-// ── Admin broadcast HTTP endpoint ─────────────────────────────────────────────
-app.use(express.json());
-
+// ── Admin HTTP endpoints ────────────────────────────────────────────────────────
 app.post("/api/admin/broadcast", async (req, res) => {
   const { secret, message, phones } = req.body || {};
-  if (!secret || secret !== (process.env.BOT_SECRET || ""))
-    return res.status(401).json({ ok: false, error: "Unauthorized" });
-  if (!message?.trim())
-    return res.status(400).json({ ok: false, error: "message required" });
+  if (!secret || secret !== (process.env.BOT_SECRET || "")) return res.status(401).json({ ok: false, error: "Unauthorized" });
+  if (!message?.trim()) return res.status(400).json({ ok: false, error: "message required" });
   try {
-    let targets = Array.isArray(phones) && phones.length
-      ? phones
-      : (await Conversation.find({}, { phoneNumber: 1 }).lean()).map(d => d.phoneNumber).filter(Boolean);
+    let targets = Array.isArray(phones) && phones.length ? phones : (await Conversation.find({}, { phoneNumber: 1 }).lean()).map(d => d.phoneNumber).filter(Boolean);
     res.json({ ok: true, queued: targets.length });
     const result = await admin.broadcast(targets, message.trim());
-    await admin.toEventsGroup(`📢 BROADCAST SENT
-Message: "${message.slice(0,80)}"
-Sent: ${result.sent} | Failed: ${result.failed}`);
-  } catch (e) {
-    console.error("[Broadcast API]", e.message);
-  }
+    await admin.toEventsGroup("📢 HTTP BROADCAST\n\"" + message.slice(0,80) + "\"\nSent: " + result.sent + " | Failed: " + result.failed);
+  } catch (e) { console.error("[Broadcast API]", e.message); }
 });
 
 app.get("/api/admin/stats", async (req, res) => {
   const secret = req.query.secret || req.headers["x-bot-secret"];
-  if (!secret || secret !== (process.env.BOT_SECRET || ""))
-    return res.status(401).json({ ok: false, error: "Unauthorized" });
+  if (!secret || secret !== (process.env.BOT_SECRET || "")) return res.status(401).json({ ok: false, error: "Unauthorized" });
   try {
     const total      = await Conversation.countDocuments();
     const withOrders = await Conversation.countDocuments({ "profile.totalOrders": { $gt: 0 } });
-    const recent     = await Conversation.find({}, { phoneNumber: 1, "profile.name": 1, updatedAt: 1 })
-      .sort({ updatedAt: -1 }).limit(10).lean();
+    const recent     = await Conversation.find({}, { phoneNumber: 1, "profile.name": 1, updatedAt: 1 }).sort({ updatedAt: -1 }).limit(10).lean();
     res.json({ ok: true, totalCustomers: total, customersWithOrders: withOrders, recentChats: recent });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log("[Server] Running on port " + PORT));
+
+process.on("unhandledRejection", (r) => console.error("[UnhandledRejection]", r));
+process.on("uncaughtException",  (e) => console.error("[UncaughtException]", e.message));
 
 // ── Bot state ──────────────────────────────────────────────────────────────────
 let isConnecting = false;
 let activeSock   = null;
 
-// Message ID deduplication — prevents double replies when WhatsApp re-delivers
+// Message ID deduplication
 const _seenMsgIds = new Set();
 const markSeen = (id) => {
   if (_seenMsgIds.size >= 500) _seenMsgIds.delete(_seenMsgIds.values().next().value);
@@ -139,7 +120,6 @@ const startBot = async () => {
   if (isConnecting) return;
   isConnecting = true;
 
-  // Tear down previous socket to prevent duplicate event listeners
   if (activeSock) {
     try { activeSock.ev.removeAllListeners(); activeSock.ws?.close(); } catch (_) {}
     activeSock = null;
@@ -148,23 +128,18 @@ const startBot = async () => {
 
   try {
     await connectDB();
-
-    // Give Conversation model to admin so it can run DB queries for WhatsApp commands
     admin.setConversationModel(Conversation);
 
     const { state, saveCreds } = await useMongoAuthState();
     const { version }          = await fetchLatestBaileysVersion();
-    console.log(`[Baileys] WA version: ${version.join(".")}`);
+    console.log("[Baileys] WA version: " + version.join("."));
 
     const sock = makeWASocket({
-      version,
-      auth: state,
+      version, auth: state,
       logger: pino({ level: "error" }),
       printQRInTerminal: false,
       browser: ["SatvikMeals Bot", "Chrome", "1.0.0"],
-      connectTimeoutMs:    60_000,
-      keepAliveIntervalMs: 30_000,
-      retryRequestDelayMs: 2_000,
+      connectTimeoutMs: 60_000, keepAliveIntervalMs: 30_000, retryRequestDelayMs: 2_000,
     });
 
     activeSock = sock;
@@ -172,33 +147,19 @@ const startBot = async () => {
 
     sock.ev.on("connection.update", async (update) => {
       const { connection, lastDisconnect, qr } = update;
-
       if (qr) {
-        try {
-          currentQR = await qrcode.toDataURL(qr, { width: 300, margin: 2 });
-          botStatus = "qr_ready";
-          console.log("[QR] ✅ Ready — open your Render URL and scan.");
-        } catch (e) { console.error("[QR] Failed:", e.message); }
+        try { currentQR = await qrcode.toDataURL(qr, { width: 300, margin: 2 }); botStatus = "qr_ready"; } catch (_) {}
       }
-
       if (connection === "close") {
         currentQR = null;
         const code = lastDisconnect?.error?.output?.statusCode;
         const shouldReconnect = code !== DisconnectReason.loggedOut;
-        console.log(`[Baileys] Closed. Code: ${code}. Reconnect: ${shouldReconnect}`);
-        if (shouldReconnect) {
-          botStatus    = "reconnecting";
-          isConnecting = false;
-          setTimeout(startBot, 10_000);
-        } else {
-          botStatus = "logged_out";
-        }
+        console.log("[Baileys] Closed. Code: " + code + ". Reconnect: " + shouldReconnect);
+        if (shouldReconnect) { botStatus = "reconnecting"; isConnecting = false; setTimeout(startBot, 10_000); }
+        else { botStatus = "logged_out"; }
       }
-
       if (connection === "open") {
-        botStatus    = "ready";
-        currentQR    = null;
-        isConnecting = false;
+        botStatus = "ready"; currentQR = null; isConnecting = false;
         console.log("[Baileys] ✅ Connected to WhatsApp!");
         admin.setSocket(sock);
         scheduler.setSocket(sock);
@@ -209,79 +170,95 @@ const startBot = async () => {
 
     sock.ev.on("messages.upsert", async ({ messages, type }) => {
       if (type !== "notify") return;
+
       for (const msg of messages) {
         if (msg.key.fromMe) continue;
         const jid = msg.key.remoteJid;
-        if (jid === "status@broadcast") continue;
+        if (!jid || jid === "status@broadcast") continue;
 
-        // ── Group JID helper — log any group message so admin can copy the JID ──
-        // Send any message in your group, the bot will log the JID to console
-        // AND reply in the group with the JID so you can copy it easily.
+        // Extract text from all message types
+        const text =
+          msg.message?.conversation ||
+          msg.message?.extendedTextMessage?.text ||
+          msg.message?.imageMessage?.caption ||
+          msg.message?.videoMessage?.caption ||
+          msg.message?.buttonsResponseMessage?.selectedButtonId ||
+          msg.message?.listResponseMessage?.singleSelectReply?.selectedRowId ||
+          "";
+
+        // Extract media info for payment screenshots etc.
+        const hasImage = !!msg.message?.imageMessage;
+        const hasVideo = !!msg.message?.videoMessage;
+        const pushName = msg.pushName || "";
+
+        // ── GROUP MESSAGES ─────────────────────────────────────────────────────
         if (isJidGroup(jid)) {
-          const text =
-            msg.message?.conversation ||
-            msg.message?.extendedTextMessage?.text || "";
+          const eventsGroup = process.env.EVENTS_GROUP_JID || "";
+
+          // Log group JID if requested
           if (text.toLowerCase().includes("jid") || text.toLowerCase().includes("group id")) {
-            console.log(`[GROUP JID] ${jid}`);
-            try {
-              await sock.sendMessage(jid, {
-                text: `This group JID is:\n${jid}\n\nCopy this and set it in your .env as STATUS_GROUP_JID or EVENTS_GROUP_JID`,
-              });
-            } catch (_) {}
-          } else {
-            // Always log group JIDs to console silently so you can find them
-            console.log(`[GROUP MSG] JID: ${jid} | From: ${msg.pushName || "?"} | Text: ${text.slice(0, 40)}`);
+            try { await sock.sendMessage(jid, { text: "This group JID is:\n" + jid }); } catch (_) {}
+            continue;
           }
-          continue; // don't process group messages as customer messages
+
+          // Admin commands from EVENTS GROUP — any member can use !commands
+          if (eventsGroup && jid === eventsGroup && text.trim().startsWith("!")) {
+            const senderJid = msg.key.participant || jid;
+            console.log("[GROUP CMD] " + senderJid + ": " + text.slice(0, 50));
+            await admin.handleAdminCommand(text.trim(), eventsGroup).catch(e => console.error("[GroupCmd]", e.message));
+            continue;
+          }
+
+          // Log all group messages silently
+          console.log("[GROUP] " + jid + " | " + pushName + ": " + text.slice(0, 40));
+          continue;
         }
 
         if (!jid) continue;
 
         // Deduplicate by message ID
         const msgId = msg.key.id;
-        if (msgId && _seenMsgIds.has(msgId)) {
-          console.warn(`[SKIP] Duplicate msgId: ${msgId}`);
-          continue;
-        }
+        if (msgId && _seenMsgIds.has(msgId)) { console.warn("[SKIP] Duplicate: " + msgId); continue; }
         if (msgId) markSeen(msgId);
 
-        const text =
-          msg.message?.conversation ||
-          msg.message?.extendedTextMessage?.text ||
-          msg.message?.imageMessage?.caption ||
-          msg.message?.buttonsResponseMessage?.selectedButtonId ||
-          msg.message?.listResponseMessage?.singleSelectReply?.selectedRowId ||
-          "";
+        console.log("[MSG] JID: " + jid + " | isAdmin: " + admin.isAdminJid(jid) + " | text: " + text.slice(0, 40));
 
-        if (!text.trim()) continue;
+        // Learn admin LID from @lid messages
+        if (jid.endsWith("@lid")) admin.learnAdminLid(jid);
 
-        const pushName = msg.pushName || "";
+        // ── ADMIN DM COMMANDS ──────────────────────────────────────────────────
+        const isAdmin = admin.isAdminJid(jid);
+        const isLidCmd = jid.endsWith("@lid") && text.trim().startsWith("!");
 
-        // ── Admin WhatsApp commands (DM from admin number) ──────────────────
-        // Log every DM so you can see the exact JID format in Render logs
-        console.log(`[MSG] JID: ${jid} | isAdmin: ${admin.isAdminJid(jid)} | text: ${text.slice(0,40)}`);
-
-        // If this is a LID JID, try to learn it as the admin LID
-        // The first @lid message that sends a ! command gets registered as admin
-        if (jid.endsWith("@lid") && text.trim().startsWith("!")) {
-          admin.learnAdminLid(jid);
+        if (isAdmin || isLidCmd) {
+          if (isLidCmd && !isAdmin) admin.learnAdminLid(jid);
+          if (text.trim().startsWith("!")) {
+            const handled = await admin.handleAdminCommand(text.trim(), jid).catch(e => { console.error("[AdminCmd]", e.message); return false; });
+            if (handled) continue;
+            await admin.toDM("Send !help to see all admin commands.");
+            continue;
+          }
+          // Non-command message from admin DM — process normally as customer too
+          // (so admin can test the bot from their own number)
         }
 
-        if (admin.isAdminJid(jid)) {
-          const handled = await admin.handleAdminCommand(text.trim()).catch(e => {
-            console.error("[AdminCmd]", e.message);
-            return false;
-          });
-          if (handled) continue; // don't process as customer message
-          // If not a ! command, still don't send to customer AI — send help hint
-          await admin.toDM(`Send !help to see all admin commands.`);
+        // ── PAYMENT SCREENSHOT ─────────────────────────────────────────────────
+        if (hasImage && !text.trim()) {
+          // Image with no caption — likely a payment screenshot
+          const phone = jid.replace("@s.whatsapp.net","").replace(/\D/g,"").slice(-10);
+          await admin.toEventsGroup("📸 PAYMENT SCREENSHOT RECEIVED\n\n📱 " + phone + "\n\nCheck WhatsApp for the screenshot. Verify and confirm manually.");
+          await admin.toDM("📸 PAYMENT SCREENSHOT from " + phone + "\n\nTo confirm: !send " + phone + " Aapka payment confirm ho gaya ✅ Subscription activate ho raha hai.");
+          try {
+            await sock.sendMessage(jid, { text: "Aapka payment screenshot mil gaya ✅ Hamari team verify karke 2-4 ghante mein activate kar degi. Ya call karein: 6201276506" });
+          } catch (_) {}
           continue;
         }
 
-        // ── Normal customer message ─────────────────────────────────────────
-        handleMessage(sock, jid, text.trim(), pushName).catch((e) =>
-          console.error(`[MsgErr] ${jid}: ${e.message}`)
-        );
+        // Skip messages with no text
+        if (!text.trim()) continue;
+
+        // ── NORMAL CUSTOMER MESSAGE ────────────────────────────────────────────
+        handleMessage(sock, jid, text.trim(), pushName).catch(e => console.error("[MsgErr] " + jid + ": " + e.message));
       }
     });
 
