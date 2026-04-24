@@ -130,7 +130,18 @@ knownBlock +
 "\nTHIS WEEK'S MENU:\n" + liveMenu + "\n" +
 "\nMONTHLY PLANS (only these two — never mention others):\n" + livePlans + "\n" +
 "Ref: " + planSummary + "\n" +
-"\nDAILY TIFFIN: Rs.80 per plate (today's menu) + Rs.20 delivery\n" +
+"\nPAYMENT SCREENSHOT HANDLING:\n" +
+"When customer says: bhej diya, send kar diya, image bheja, screenshot bheja, dekho, check karo:\n" +
+"They have already sent a payment image in this chat. DO NOT say you didn't receive it.\n" +
+"Say: Aapka payment screenshot hamare team ko mil gaya ✅ 2-4 ghante mein verify karke activate kar denge. Urgent ho to call karein: 6201276506\n" +
+"If they say payment done / payment kar diya / paid:\n" +
+"[CONFIRM_PAYMENT]\nAmount: amount if mentioned\nReference: ref if given\n[/CONFIRM_PAYMENT]\n" +
+"\n" +
+"\nDAILY TIFFIN PRICING:\n" +
+"Rs.80 per plate per meal (lunch = 1 meal, dinner = 1 meal, both = 2 meals)\n" +
+"Example: 4 plates x lunch+dinner = 8 plates/meals per day = Rs.640/day\n" +
+"Delivery: Rs.20 per day within 3km of Rajapul | Rs.30 per day if farther\n" +
+"Total formula: (plates x meals_per_day x days x Rs.80) + (days x delivery_charge)\n" +
 "Custom plates: coordinate with admin\n" +
 "\nWEBSITE FEATURES:\n" +
 "Google Sign-In (no password) | Dashboard with orders, coins, health report\n" +
@@ -171,7 +182,13 @@ welcomeMsg + "\n\n" +
 "2. Which meals — lunch, dinner, or both?\n" +
 "3. For how many days?\n" +
 "4. Delivery address with landmark (skip if in profile)\n" +
-"5. Confirm total = (plates x Rs.80 x days) + Rs.20 delivery per order\n\n" +
+"5. Calculate total correctly:\n" +
+"   Meals per day = plates x meals (lunch=1, dinner=1, both=2)\n" +
+"   Food cost = meals_per_day x days x Rs.80\n" +
+"   Delivery = days x Rs.20 (within 3km) or days x Rs.30 (farther)\n" +
+"   EXAMPLE: 4 plates, lunch+dinner, 4 days, within 3km\n" +
+"   = (4 x 2 x 4 x 80) + (4 x 20) = Rs.2560 + Rs.80 = Rs.2640\n" +
+"   Always show the calculation breakdown clearly\n\n" +
 "When confirmed:\n" +
 "[DAILY_ORDER]\n" +
 "Plates: number\n" +
