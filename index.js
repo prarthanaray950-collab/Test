@@ -273,6 +273,40 @@ const startBot = async () => {
           continue;
         }
 
+        // ── LOCATION SHARING ───────────────────────────────────────────────────
+        const locMsg = msg.message?.locationMessage;
+        if (locMsg) {
+          const phone = jid.replace("@s.whatsapp.net","").replace(/\D/g,"").slice(-10);
+          const lat  = locMsg.degreesLatitude;
+          const lng  = locMsg.degreesLongitude;
+          const mapsUrl = "https://www.google.com/maps?q=" + lat + "," + lng;
+          const name = (await require('./bot/contextManager').getHistoryAndProfile(phone)).profile?.name || "Unknown";
+          await admin.toEventsGroup("\uD83D\uDCCD LOCATION SHARED\n\n\uD83D\uDC64 " + name + "\n\uD83D\uDCF1 " + phone + "\nCoords: " + lat.toFixed(4) + ", " + lng.toFixed(4) + "\n\uD83D\uDDFA Maps: " + mapsUrl + "\n\nCheck if within 3km of Rajapul and reply:\n!send " + phone + " Aapke area mein delivery available hai \u2705");
+          try { await sock.sendMessage(jid, { text: "Aapki location mil gayi \uD83C\uDF3F Hamari team 1-2 ghante mein delivery availability confirm karegi. Ya seedha call karein: 6201276506" }); } catch (_) {}
+          continue;
+        }
+
+        // ── VOICE NOTE / AUDIO ─────────────────────────────────────────────────
+        const audioMsg = msg.message?.audioMessage;
+        if (audioMsg) {
+          const voiceProcessor = require('./bot/voiceProcessor');
+          if (voiceProcessor.isAvailable()) {
+            try { await sock.sendPresenceUpdate("composing", jid); } catch (_) {}
+            const transcribed = await voiceProcessor.transcribe(msg, sock).catch(e => null);
+            if (transcribed) {
+              console.log("[VOICE] Transcribed: " + transcribed.slice(0,60));
+              const ackText = "Aapne bola: \"" + transcribed + "\"\n\nProcess kar raha hoon \uD83C\uDF3F";
+              try { await sock.sendMessage(jid, { text: ackText }); } catch (_) {}
+              handleMessage(sock, jid, transcribed, pushName).catch(() => {});
+            } else {
+              try { await sock.sendMessage(jid, { text: "Voice note clearly sun nahi aaya \uD83D\uDE4F Text mein bhejein ya call karein: 6201276506" }); } catch (_) {}
+            }
+          } else {
+            try { await sock.sendMessage(jid, { text: "Voice notes abhi supported nahi hain \uD83C\uDF3F Apna message text mein bhejein." }); } catch (_) {}
+          }
+          continue;
+        }
+
         // Skip messages with no text
         if (!text.trim()) continue;
 
