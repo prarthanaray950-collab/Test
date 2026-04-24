@@ -146,13 +146,18 @@ const getExpiringSubscriptions = async (withinDays = 2) => {
 };
 
 const getPendingFeedback = async () => {
-  const twoHoursAgo = new Date(Date.now() - 2*60*60*1000);
-  const todayStart  = new Date(); todayStart.setHours(0,0,0,0);
+  // Find all customers who have ordered (any time) and haven't been asked for
+  // feedback today. We removed the lastOrderAt requirement because it's often
+  // null for subscription customers whose orders go through the website API.
+  const todayStart = new Date(); todayStart.setHours(0,0,0,0);
   try {
     return await Conversation.find({
-      "profile.lastOrderAt": { $lte: twoHoursAgo },
       "profile.totalOrders": { $gt: 0 },
-      $or: [{ "profile.lastFeedbackAt": { $lt: todayStart } }, { "profile.lastFeedbackAt": null }],
+      $or: [
+        { "profile.lastFeedbackAt": { $lt: todayStart } },
+        { "profile.lastFeedbackAt": null },
+        { "profile.lastFeedbackAt": { $exists: false } },
+      ],
     }, { phoneNumber: 1, "profile.name": 1 }).lean();
   } catch (e) { return []; }
 };
