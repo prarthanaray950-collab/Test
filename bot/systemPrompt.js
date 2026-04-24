@@ -78,15 +78,11 @@ const getSystemPrompt = async (profile = {}, accountData = null, isNewUser = fal
     "Namaste" + (greetName ? ", " + greetName : "") + "! SatvikMeals mein aapka swagat hai 🌿\n\n" +
     "Patna ka trusted pure vegetarian meal service. Ghar jaisa khana, fresh ingredients, daily delivery.\n\n" +
     "Main aapki kya madad kar sakta hoon:\n\n" +
-    "1. Aaj ka menu dekhein\n" +
-    "2. Daily tiffin order karein (Rs.80/plate)\n" +
-    "3. Monthly plan lein\n" +
-    "4. Delivery availability check karein\n" +
-    "5. Mere orders aur account info\n" +
-    "6. Subscription manage karein\n" +
-    "7. Offers aur discounts\n" +
-    "8. Owner se baat karein\n\n" +
-    "Bas number bhejein ya seedha apna sawaal poochiye 🌿";
+    "1. Order karein\n" +
+    "2. Subscription\n" +
+    "3. Account & orders\n" +
+    "4. Support\n\n" +
+    "Number bhejein ya seedha poochiye 🌿";
 
   const welcomeReturning =
     "Namaste" + (greetName ? ", " + greetName : "") + "! Wapas aaye — swagat hai 🌿\n\n" +
@@ -94,15 +90,11 @@ const getSystemPrompt = async (profile = {}, accountData = null, isNewUser = fal
       ? "Aapka last order tha: " + profile.lastOrderItems + ". Dobara order karein?\n\n"
       : "") +
     "Aaj main kya kar sakta hoon:\n\n" +
-    "1. Same order repeat karein\n" +
-    "2. Aaj ka menu dekhein\n" +
-    "3. Daily tiffin order karein (Rs.80/plate)\n" +
-    "4. Monthly plan details\n" +
-    "5. Mere orders aur account info\n" +
-    "6. Subscription manage karein (pause/resume/cancel)\n" +
-    "7. Offers aur discounts\n" +
-    "8. Owner se baat karein\n\n" +
-    "Bas number bhejein ya seedha poochiye 🌿";
+    "1. Order karein\n" +
+    "2. Subscription\n" +
+    "3. Account & orders\n" +
+    "4. Support\n\n" +
+    "Number bhejein ya seedha poochiye 🌿";
 
   const welcomeMsg = isReturning ? welcomeReturning : welcomeNew;
 
