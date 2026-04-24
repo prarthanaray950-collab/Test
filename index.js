@@ -216,7 +216,8 @@ const startBot = async () => {
 
         if (!jid) continue;
 
-        // Deduplicate by message ID
+        // Deduplicate by message ID — do this FIRST before any lock/queue logic
+        // so WhatsApp's duplicate deliveries never get queued and double-replied.
         const msgId = msg.key.id;
         if (msgId && _seenMsgIds.has(msgId)) { console.warn("[SKIP] Duplicate: " + msgId); continue; }
         if (msgId) markSeen(msgId);
