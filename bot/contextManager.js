@@ -14,10 +14,25 @@ const normalizePhone = (raw) => {
 // we queue them and process in order. This prevents "stops replying"
 // when user sends two messages quickly.
 const _queues    = new Map(); // phone -> [{ text, rawJid, pushName, sock }]
-const _busy      = new Set(); // phones currently being processed
+const _busy      = new Map(); // phone -> timestamp when processing started
 
-const isAlreadyProcessing = (phone) => _busy.has(phone);
-const markProcessingStart = (phone) => _busy.add(phone);
+// Auto-clear stale locks after 45 seconds.
+// This prevents the "bot stops responding" bug where a crash or connection drop
+// leaves the lock permanently set, blocking all future messages from that number.
+const LOCK_TIMEOUT_MS = 45000;
+
+const isAlreadyProcessing = (phone) => {
+  const ts = _busy.get(phone);
+  if (!ts) return false;
+  if (Date.now() - ts > LOCK_TIMEOUT_MS) {
+    // Stale lock — clear it automatically
+    console.warn("[CTX] Stale lock cleared for " + phone);
+    _busy.delete(phone);
+    return false;
+  }
+  return true;
+};
+const markProcessingStart = (phone) => _busy.set(phone, Date.now());
 const markProcessingDone  = (phone) => _busy.delete(phone);
 
 // Enqueue a message. Returns true if it was queued (caller should not process immediately).
