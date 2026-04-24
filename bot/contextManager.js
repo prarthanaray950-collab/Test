@@ -16,16 +16,13 @@ const normalizePhone = (raw) => {
 const _queues    = new Map(); // phone -> [{ text, rawJid, pushName, sock }]
 const _busy      = new Map(); // phone -> timestamp when processing started
 
-// Auto-clear stale locks after 45 seconds.
-// This prevents the "bot stops responding" bug where a crash or connection drop
-// leaves the lock permanently set, blocking all future messages from that number.
-const LOCK_TIMEOUT_MS = 45000;
+// Reduced from 45s → 20s so a crash/timeout doesn't block the user for long.
+const LOCK_TIMEOUT_MS = 20000;
 
 const isAlreadyProcessing = (phone) => {
   const ts = _busy.get(phone);
   if (!ts) return false;
   if (Date.now() - ts > LOCK_TIMEOUT_MS) {
-    // Stale lock — clear it automatically
     console.warn("[CTX] Stale lock cleared for " + phone);
     _busy.delete(phone);
     return false;
@@ -35,10 +32,18 @@ const isAlreadyProcessing = (phone) => {
 const markProcessingStart = (phone) => _busy.set(phone, Date.now());
 const markProcessingDone  = (phone) => _busy.delete(phone);
 
-// Enqueue a message. Returns true if it was queued (caller should not process immediately).
+// Enqueue a message. Silently drops it if an identical text is already
+// pending — this prevents WhatsApp's duplicate delivery from causing
+// double replies (the "only responds on second send" symptom).
 const enqueue = (phone, item) => {
   if (!_queues.has(phone)) _queues.set(phone, []);
-  _queues.get(phone).push(item);
+  const q = _queues.get(phone);
+  // Drop duplicate: same text already last in queue
+  if (q.length && q[q.length - 1].userText === item.userText) {
+    console.log("[CTX] Duplicate queued msg dropped for " + phone + ": " + item.userText.slice(0,30));
+    return;
+  }
+  q.push(item);
 };
 
 // Dequeue next message for this phone. Returns item or null.
