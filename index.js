@@ -181,25 +181,14 @@ const startBot = async () => {
     });
 
     sock.ev.on("messages.upsert", async ({ messages, type }) => {
-      // Accept both "notify" and "append" — Baileys uses both depending on version
-      if (type !== "notify" && type !== "append") return;
+      if (type !== "notify") return;
 
       for (const msg of messages) {
         if (msg.key.fromMe) continue;
         const jid = msg.key.remoteJid;
         if (!jid || jid === "status@broadcast") continue;
 
-        // ── REPLAY GUARD ───────────────────────────────────────────────────────
-        // On reconnect, Baileys replays recent messages from WA servers.
-        // Drop any message older than 30 seconds to ignore replays.
-        const msgTs = (msg.messageTimestamp || 0) * 1000; // WA timestamps are in seconds
-        if (msgTs && Date.now() - msgTs > 30000) {
-          console.warn("[SKIP] Old message (replay?): " + new Date(msgTs).toISOString() + " | " + jid);
-          continue;
-        }
-
         // Extract text from ALL possible message wrapper types
-        // (Baileys wraps messages differently based on WA version and ephemeral settings)
         const inner = msg.message || {};
         const text =
           inner.conversation ||
@@ -208,23 +197,19 @@ const startBot = async () => {
           inner.videoMessage?.caption ||
           inner.buttonsResponseMessage?.selectedButtonId ||
           inner.listResponseMessage?.singleSelectReply?.selectedRowId ||
-          // Ephemeral/view-once wrappers — these are the most commonly missed
           inner.ephemeralMessage?.message?.conversation ||
           inner.ephemeralMessage?.message?.extendedTextMessage?.text ||
           inner.viewOnceMessage?.message?.conversation ||
           inner.viewOnceMessage?.message?.extendedTextMessage?.text ||
-          inner.documentWithCaptionMessage?.message?.imageMessage?.caption ||
-          inner.editedMessage?.message?.protocolMessage?.editedMessage?.conversation ||
           "";
 
         const hasImage = !!(inner.imageMessage ||
           inner.ephemeralMessage?.message?.imageMessage ||
           inner.viewOnceMessage?.message?.imageMessage);
 
-        const hasAudio = !!(
-          (inner.audioMessage && inner.audioMessage.pttDuration > 0) ||
-          inner.ephemeralMessage?.message?.audioMessage
-        );
+        // ptt=true means recorded voice note; seconds>0 as fallback
+        const audioMsg = inner.audioMessage || inner.ephemeralMessage?.message?.audioMessage;
+        const hasAudio = !!(audioMsg && (audioMsg.ptt === true || (audioMsg.seconds || 0) > 0));
 
         const pushName = msg.pushName || "";
 
@@ -321,7 +306,7 @@ const startBot = async () => {
               try { await sock.sendMessage(jid, { text: "Voice note clearly sun nahi aaya 🙏 Text mein bhejein ya call karein: 6201276506" }); } catch (_) {}
             }
           } else {
-            try { await sock.sendMessage(jid, { text: "Voice notes abhi supported nahi hain 🌿 Apna message text mein bhejein." }); } catch (_) {}
+            try { await sock.sendMessage(jid, { text: "Voice note mila ✅ Lekin abhi voice samajhna mushkil hai 🙏\n\nApna order ya sawaal text mein likh kar bhejein — bahut jaldi reply milegi!\n\nExample: \"1 plate lunch aaj chahiye\" ya \"monthly plan lena hai\" 🌿" }); } catch (_) {}
           }
           continue;
         }
