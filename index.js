@@ -181,24 +181,51 @@ const startBot = async () => {
     });
 
     sock.ev.on("messages.upsert", async ({ messages, type }) => {
-      if (type !== "notify") return;
+      // Accept both "notify" and "append" — Baileys uses both depending on version
+      if (type !== "notify" && type !== "append") return;
 
       for (const msg of messages) {
         if (msg.key.fromMe) continue;
         const jid = msg.key.remoteJid;
         if (!jid || jid === "status@broadcast") continue;
 
-        // Extract text from all message types
+        // ── REPLAY GUARD ───────────────────────────────────────────────────────
+        // On reconnect, Baileys replays recent messages from WA servers.
+        // Drop any message older than 30 seconds to ignore replays.
+        const msgTs = (msg.messageTimestamp || 0) * 1000; // WA timestamps are in seconds
+        if (msgTs && Date.now() - msgTs > 30000) {
+          console.warn("[SKIP] Old message (replay?): " + new Date(msgTs).toISOString() + " | " + jid);
+          continue;
+        }
+
+        // Extract text from ALL possible message wrapper types
+        // (Baileys wraps messages differently based on WA version and ephemeral settings)
+        const inner = msg.message || {};
         const text =
-          msg.message?.conversation ||
-          msg.message?.extendedTextMessage?.text ||
-          msg.message?.imageMessage?.caption ||
-          msg.message?.videoMessage?.caption ||
-          msg.message?.buttonsResponseMessage?.selectedButtonId ||
-          msg.message?.listResponseMessage?.singleSelectReply?.selectedRowId ||
+          inner.conversation ||
+          inner.extendedTextMessage?.text ||
+          inner.imageMessage?.caption ||
+          inner.videoMessage?.caption ||
+          inner.buttonsResponseMessage?.selectedButtonId ||
+          inner.listResponseMessage?.singleSelectReply?.selectedRowId ||
+          // Ephemeral/view-once wrappers — these are the most commonly missed
+          inner.ephemeralMessage?.message?.conversation ||
+          inner.ephemeralMessage?.message?.extendedTextMessage?.text ||
+          inner.viewOnceMessage?.message?.conversation ||
+          inner.viewOnceMessage?.message?.extendedTextMessage?.text ||
+          inner.documentWithCaptionMessage?.message?.imageMessage?.caption ||
+          inner.editedMessage?.message?.protocolMessage?.editedMessage?.conversation ||
           "";
 
-        const hasImage = !!msg.message?.imageMessage;
+        const hasImage = !!(inner.imageMessage ||
+          inner.ephemeralMessage?.message?.imageMessage ||
+          inner.viewOnceMessage?.message?.imageMessage);
+
+        // ptt = push-to-talk = voice note recorded in WhatsApp
+        // We check ptt:true OR seconds>0 to cover all Baileys versions
+        const audioMsg = inner.audioMessage || inner.ephemeralMessage?.message?.audioMessage;
+        const hasAudio = !!(audioMsg && (audioMsg.ptt === true || (audioMsg.seconds || 0) > 0));
+
         const pushName = msg.pushName || "";
 
         // ── GROUP MESSAGES ─────────────────────────────────────────────────────
@@ -226,14 +253,13 @@ const startBot = async () => {
         if (msgId) markSeen(msgId);
 
         // ── DEDUP: Layer 2 — same text within 8s window ────────────────────────
-        // Skip blank text for this check (images with no caption, audio, etc.)
         const phone = jid.replace("@s.whatsapp.net","").replace(/\D/g,"").slice(-10);
         if (text.trim() && isDuplicateText(phone, text.trim())) {
           console.warn("[SKIP] Duplicate text within window: " + phone + " — " + text.slice(0,30));
           continue;
         }
 
-        console.log("[MSG] JID: " + jid + " | isAdmin: " + admin.isAdminJid(jid) + " | text: " + text.slice(0, 40));
+        console.log("[MSG] " + phone + " | type=" + type + " | text=\"" + text.slice(0,40) + "\" | hasImage=" + hasImage + " | hasAudio=" + hasAudio + " | msgKeys=" + Object.keys(inner).join(",").slice(0,80));
 
         if (jid.endsWith("@lid")) admin.learnAdminLid(jid);
 
@@ -248,50 +274,40 @@ const startBot = async () => {
             await admin.toDM("Send !help to see all admin commands.");
             continue;
           }
-          // Fall through: let admin test the bot from their own number
         }
 
         // ── PAYMENT SCREENSHOT ─────────────────────────────────────────────────
         if (hasImage) {
-          // Guard: Baileys re-delivers outbound msgs as fromMe=false on reconnect.
-          // Outbound Baileys message IDs start with "BAE5" — skip those.
           if (msgId && msgId.startsWith("BAE5")) {
             console.warn("[SKIP] Own message re-delivered as image: " + msgId);
             continue;
           }
-
           const evGrp = process.env.EVENTS_GROUP_JID || "";
           if (evGrp && admin._sock) {
-            try {
-              await sock.sendMessage(evGrp, { forward: msg, force: true });
-            } catch (_) {
-              await admin.toEventsGroup("📸 PAYMENT SCREENSHOT from " + phone + "\n(Image in customer chat — check WhatsApp)");
-            }
+            try { await sock.sendMessage(evGrp, { forward: msg, force: true }); }
+            catch (_) { await admin.toEventsGroup("📸 PAYMENT SCREENSHOT from " + phone + "\n(Check customer chat)"); }
           }
-          await admin.toDM("📸 PAYMENT SCREENSHOT from " + phone + "\n\nTo confirm payment:\n!send " + phone + " Aapka payment confirm ho gaya ✅ Subscription 2-4 ghante mein activate ho jaayega.");
-          await admin.toEventsGroup("📸 SCREENSHOT RECEIVED\n📱 " + phone + "\nCaption: " + (text||"(no caption)") + "\n\nConfirm: !send " + phone + " Payment confirmed ✅");
+          await admin.toDM("📸 PAYMENT SCREENSHOT from " + phone + "\n\nTo confirm:\n!send " + phone + " Aapka payment confirm ho gaya ✅ Subscription 2-4 ghante mein activate ho jaayega.");
+          await admin.toEventsGroup("📸 SCREENSHOT RECEIVED\n📱 " + phone + "\nCaption: " + (text||"(none)") + "\n\nConfirm: !send " + phone + " Payment confirmed ✅");
           try { await sock.sendMessage(jid, { text: "Aapka payment screenshot mil gaya ✅ Hamari team verify karke 2-4 ghante mein activate kar degi. Urgent ho to call karein: 6201276506" }); } catch (_) {}
           if (text.trim()) handleMessage(sock, jid, text.trim(), pushName).catch(() => {});
           continue;
         }
 
         // ── LOCATION SHARING ───────────────────────────────────────────────────
-        const locMsg = msg.message?.locationMessage;
+        const locMsg = inner.locationMessage;
         if (locMsg) {
-          const lat  = locMsg.degreesLatitude;
-          const lng  = locMsg.degreesLongitude;
+          const lat = locMsg.degreesLatitude, lng = locMsg.degreesLongitude;
           const mapsUrl = "https://www.google.com/maps?q=" + lat + "," + lng;
           const ctxMod = require('./bot/contextManager');
           const { profile: locProfile } = await ctxMod.getHistoryAndProfile(phone).catch(() => ({ profile: {} }));
-          const locName = locProfile?.name || "Unknown";
-          await admin.toEventsGroup("📍 LOCATION SHARED\n\n👤 " + locName + "\n📱 " + phone + "\nCoords: " + lat.toFixed(4) + ", " + lng.toFixed(4) + "\n🗺 Maps: " + mapsUrl + "\n\nCheck if within 3km of Rajapul and reply:\n!send " + phone + " Aapke area mein delivery available hai ✅");
-          try { await sock.sendMessage(jid, { text: "Aapki location mil gayi 🌿 Hamari team 1-2 ghante mein delivery availability confirm karegi. Ya seedha call karein: 6201276506" }); } catch (_) {}
+          await admin.toEventsGroup("📍 LOCATION\n\n👤 " + (locProfile?.name||"Unknown") + "\n📱 " + phone + "\n🗺 " + mapsUrl + "\n\n!send " + phone + " Aapke area mein delivery available hai ✅");
+          try { await sock.sendMessage(jid, { text: "Aapki location mil gayi 🌿 Hamari team 1-2 ghante mein confirm karegi. Ya call karein: 6201276506" }); } catch (_) {}
           continue;
         }
 
         // ── VOICE NOTE ─────────────────────────────────────────────────────────
-        const audioMsg = msg.message?.audioMessage;
-        if (audioMsg) {
+        if (hasAudio) {
           const voiceProcessor = require('./bot/voiceProcessor');
           if (voiceProcessor.isAvailable()) {
             try { await sock.sendPresenceUpdate("composing", jid); } catch (_) {}
@@ -301,16 +317,20 @@ const startBot = async () => {
               try { await sock.sendMessage(jid, { text: "Aapne bola: \"" + transcribed + "\"\n\nProcess kar raha hoon 🌿" }); } catch (_) {}
               handleMessage(sock, jid, transcribed, pushName).catch(() => {});
             } else {
-              try { await sock.sendMessage(jid, { text: "Voice note clearly sun nahi aaya 🙏 Text mein bhejein ya call karein: 6201276506" }); } catch (_) {}
+              try { await sock.sendMessage(jid, { text: "Voice clearly nahi sun paya 🙏 Apna order ya sawaal text mein likh kar bhejein — jaldi reply milegi!" }); } catch (_) {}
             }
           } else {
-            try { await sock.sendMessage(jid, { text: "Voice notes abhi supported nahi hain 🌿 Apna message text mein bhejein." }); } catch (_) {}
+            // Voice transcription not set up — ask them to type
+            try { await sock.sendMessage(jid, { text: "Voice note mila ✅ Lekin abhi voice samajhna mushkil hai 🙏\n\nApna order ya sawaal text mein likh kar bhejein — bahut jaldi reply milegi!\n\nExample: \"1 plate lunch aaj chahiye\" ya \"monthly plan lena hai\" 🌿" }); } catch (_) {}
           }
           continue;
         }
 
-        // Skip empty text
-        if (!text.trim()) continue;
+        // Skip empty text (stickers, reactions, etc.)
+        if (!text.trim()) {
+          console.log("[SKIP] Empty text after extraction — msgKeys: " + Object.keys(inner).join(",").slice(0,80));
+          continue;
+        }
 
         // ── NORMAL CUSTOMER MESSAGE ────────────────────────────────────────────
         handleMessage(sock, jid, text.trim(), pushName).catch(e => console.error("[MsgErr] " + jid + ": " + e.message));
