@@ -109,11 +109,23 @@ process.on("uncaughtException",  (e) => console.error("[UncaughtException]", e.m
 let isConnecting = false;
 let activeSock   = null;
 
-// Message ID deduplication
+// ── Message deduplication ─────────────────────────────────────────────────────
+// Layer 1: exact message-ID dedup — catches WA re-deliveries with same ID
 const _seenMsgIds = new Set();
 const markSeen = (id) => {
   if (_seenMsgIds.size >= 500) _seenMsgIds.delete(_seenMsgIds.values().next().value);
   _seenMsgIds.add(id);
+};
+
+// Layer 2: per-phone time-window dedup — catches rapid duplicate sends (different IDs, same text)
+// Window is 8s to match the PROC_DEDUP_MS in contextManager.
+const _recentTexts  = new Map();
+const DEDUP_WINDOW  = 8000;
+const isDuplicateText = (phone, text) => {
+  const last = _recentTexts.get(phone);
+  if (last && last.text === text && Date.now() - last.ts < DEDUP_WINDOW) return true;
+  _recentTexts.set(phone, { text, ts: Date.now() });
+  return false;
 };
 
 const startBot = async () => {
@@ -186,51 +198,48 @@ const startBot = async () => {
           msg.message?.listResponseMessage?.singleSelectReply?.selectedRowId ||
           "";
 
-        // Extract media info for payment screenshots etc.
         const hasImage = !!msg.message?.imageMessage;
-        const hasVideo = !!msg.message?.videoMessage;
         const pushName = msg.pushName || "";
 
         // ── GROUP MESSAGES ─────────────────────────────────────────────────────
         if (isJidGroup(jid)) {
           const eventsGroup = process.env.EVENTS_GROUP_JID || "";
-
-          // Log group JID if requested
           if (text.toLowerCase().includes("jid") || text.toLowerCase().includes("group id")) {
             try { await sock.sendMessage(jid, { text: "This group JID is:\n" + jid }); } catch (_) {}
             continue;
           }
-
-          // Admin commands from EVENTS GROUP — any member can use !commands
           if (eventsGroup && jid === eventsGroup && text.trim().startsWith("!")) {
-            const senderJid = msg.key.participant || jid;
-            console.log("[GROUP CMD] " + senderJid + ": " + text.slice(0, 50));
+            console.log("[GROUP CMD] " + (msg.key.participant || jid) + ": " + text.slice(0, 50));
             await admin.handleAdminCommand(text.trim(), eventsGroup).catch(e => console.error("[GroupCmd]", e.message));
             continue;
           }
-
-          // Log all group messages silently
           console.log("[GROUP] " + jid + " | " + pushName + ": " + text.slice(0, 40));
           continue;
         }
 
-        if (!jid) continue;
-
-        // Deduplicate by message ID — do this FIRST before any lock/queue logic
-        // so WhatsApp's duplicate deliveries never get queued and double-replied.
+        // ── DEDUP: Layer 1 — message ID ────────────────────────────────────────
         const msgId = msg.key.id;
-        if (msgId && _seenMsgIds.has(msgId)) { console.warn("[SKIP] Duplicate: " + msgId); continue; }
+        if (msgId && _seenMsgIds.has(msgId)) {
+          console.warn("[SKIP] Duplicate ID: " + msgId);
+          continue;
+        }
         if (msgId) markSeen(msgId);
+
+        // ── DEDUP: Layer 2 — same text within 8s window ────────────────────────
+        // Skip blank text for this check (images with no caption, audio, etc.)
+        const phone = jid.replace("@s.whatsapp.net","").replace(/\D/g,"").slice(-10);
+        if (text.trim() && isDuplicateText(phone, text.trim())) {
+          console.warn("[SKIP] Duplicate text within window: " + phone + " — " + text.slice(0,30));
+          continue;
+        }
 
         console.log("[MSG] JID: " + jid + " | isAdmin: " + admin.isAdminJid(jid) + " | text: " + text.slice(0, 40));
 
-        // Learn admin LID from @lid messages
         if (jid.endsWith("@lid")) admin.learnAdminLid(jid);
 
         // ── ADMIN DM COMMANDS ──────────────────────────────────────────────────
-        const isAdmin = admin.isAdminJid(jid);
+        const isAdmin  = admin.isAdminJid(jid);
         const isLidCmd = jid.endsWith("@lid") && text.trim().startsWith("!");
-
         if (isAdmin || isLidCmd) {
           if (isLidCmd && !isAdmin) admin.learnAdminLid(jid);
           if (text.trim().startsWith("!")) {
@@ -239,76 +248,68 @@ const startBot = async () => {
             await admin.toDM("Send !help to see all admin commands.");
             continue;
           }
-          // Non-command message from admin DM — process normally as customer too
-          // (so admin can test the bot from their own number)
+          // Fall through: let admin test the bot from their own number
         }
 
-        // ── PAYMENT SCREENSHOT / ANY IMAGE ─────────────────────────────────────
+        // ── PAYMENT SCREENSHOT ─────────────────────────────────────────────────
         if (hasImage) {
-          const phone = jid.replace("@s.whatsapp.net","").replace(/\D/g,"").slice(-10);
+          // Guard: Baileys re-delivers outbound msgs as fromMe=false on reconnect.
+          // Outbound Baileys message IDs start with "BAE5" — skip those.
+          if (msgId && msgId.startsWith("BAE5")) {
+            console.warn("[SKIP] Own message re-delivered as image: " + msgId);
+            continue;
+          }
+
           const evGrp = process.env.EVENTS_GROUP_JID || "";
-          // Forward the actual image to events group so admin can see it
           if (evGrp && admin._sock) {
             try {
-              const imgMsg = msg.message.imageMessage;
-              await sock.sendMessage(evGrp, {
-                forward: msg,
-                force: true,
-              });
+              await sock.sendMessage(evGrp, { forward: msg, force: true });
             } catch (_) {
-              // Fallback: just notify with text if forward fails
               await admin.toEventsGroup("📸 PAYMENT SCREENSHOT from " + phone + "\n(Image in customer chat — check WhatsApp)");
             }
           }
           await admin.toDM("📸 PAYMENT SCREENSHOT from " + phone + "\n\nTo confirm payment:\n!send " + phone + " Aapka payment confirm ho gaya ✅ Subscription 2-4 ghante mein activate ho jaayega.");
           await admin.toEventsGroup("📸 SCREENSHOT RECEIVED\n📱 " + phone + "\nCaption: " + (text||"(no caption)") + "\n\nConfirm: !send " + phone + " Payment confirmed ✅");
-          // Save screenshot context to profile so AI knows about it
-          const { updateProfile } = require('./bot/contextManager');
-          await updateProfile(phone, {}).catch(()=>{});
-          // Acknowledge to customer
           try { await sock.sendMessage(jid, { text: "Aapka payment screenshot mil gaya ✅ Hamari team verify karke 2-4 ghante mein activate kar degi. Urgent ho to call karein: 6201276506" }); } catch (_) {}
-          // Also process any caption text through the bot
-          if (text.trim()) {
-            handleMessage(sock, jid, text.trim(), pushName).catch(() => {});
-          }
+          if (text.trim()) handleMessage(sock, jid, text.trim(), pushName).catch(() => {});
           continue;
         }
 
         // ── LOCATION SHARING ───────────────────────────────────────────────────
         const locMsg = msg.message?.locationMessage;
         if (locMsg) {
-          const phone = jid.replace("@s.whatsapp.net","").replace(/\D/g,"").slice(-10);
           const lat  = locMsg.degreesLatitude;
           const lng  = locMsg.degreesLongitude;
           const mapsUrl = "https://www.google.com/maps?q=" + lat + "," + lng;
-          const name = (await require('./bot/contextManager').getHistoryAndProfile(phone)).profile?.name || "Unknown";
-          await admin.toEventsGroup("\uD83D\uDCCD LOCATION SHARED\n\n\uD83D\uDC64 " + name + "\n\uD83D\uDCF1 " + phone + "\nCoords: " + lat.toFixed(4) + ", " + lng.toFixed(4) + "\n\uD83D\uDDFA Maps: " + mapsUrl + "\n\nCheck if within 3km of Rajapul and reply:\n!send " + phone + " Aapke area mein delivery available hai \u2705");
-          try { await sock.sendMessage(jid, { text: "Aapki location mil gayi \uD83C\uDF3F Hamari team 1-2 ghante mein delivery availability confirm karegi. Ya seedha call karein: 6201276506" }); } catch (_) {}
+          const ctxMod = require('./bot/contextManager');
+          const { profile: locProfile } = await ctxMod.getHistoryAndProfile(phone).catch(() => ({ profile: {} }));
+          const locName = locProfile?.name || "Unknown";
+          await admin.toEventsGroup("📍 LOCATION SHARED\n\n👤 " + locName + "\n📱 " + phone + "\nCoords: " + lat.toFixed(4) + ", " + lng.toFixed(4) + "\n🗺 Maps: " + mapsUrl + "\n\nCheck if within 3km of Rajapul and reply:\n!send " + phone + " Aapke area mein delivery available hai ✅");
+          try { await sock.sendMessage(jid, { text: "Aapki location mil gayi 🌿 Hamari team 1-2 ghante mein delivery availability confirm karegi. Ya seedha call karein: 6201276506" }); } catch (_) {}
           continue;
         }
 
-        // ── VOICE NOTE / AUDIO ─────────────────────────────────────────────────
+        // ── VOICE NOTE ─────────────────────────────────────────────────────────
         const audioMsg = msg.message?.audioMessage;
         if (audioMsg) {
           const voiceProcessor = require('./bot/voiceProcessor');
           if (voiceProcessor.isAvailable()) {
             try { await sock.sendPresenceUpdate("composing", jid); } catch (_) {}
-            const transcribed = await voiceProcessor.transcribe(msg, sock).catch(e => null);
+            const transcribed = await voiceProcessor.transcribe(msg, sock).catch(() => null);
             if (transcribed) {
               console.log("[VOICE] Transcribed: " + transcribed.slice(0,60));
-              const ackText = "Aapne bola: \"" + transcribed + "\"\n\nProcess kar raha hoon \uD83C\uDF3F";
-              try { await sock.sendMessage(jid, { text: ackText }); } catch (_) {}
+              try { await sock.sendMessage(jid, { text: "Aapne bola: \"" + transcribed + "\"\n\nProcess kar raha hoon 🌿" }); } catch (_) {}
               handleMessage(sock, jid, transcribed, pushName).catch(() => {});
             } else {
-              try { await sock.sendMessage(jid, { text: "Voice note clearly sun nahi aaya \uD83D\uDE4F Text mein bhejein ya call karein: 6201276506" }); } catch (_) {}
+              try { await sock.sendMessage(jid, { text: "Voice note clearly sun nahi aaya 🙏 Text mein bhejein ya call karein: 6201276506" }); } catch (_) {}
             }
           } else {
-            try { await sock.sendMessage(jid, { text: "Voice notes abhi supported nahi hain \uD83C\uDF3F Apna message text mein bhejein." }); } catch (_) {}
+            try { await sock.sendMessage(jid, { text: "Voice notes abhi supported nahi hain 🌿 Apna message text mein bhejein." }); } catch (_) {}
           }
           continue;
         }
 
-        // Skip messages with no text
+        // Skip empty text
         if (!text.trim()) continue;
 
         // ── NORMAL CUSTOMER MESSAGE ────────────────────────────────────────────
