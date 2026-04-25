@@ -47,18 +47,15 @@ const TG_CHAT      = () => process.env.TELEGRAM_CHAT_ID   || "";
 
 const setSocket            = (sock)  => { _sock = sock; };
 const setConversationModel = (model) => { _Conversation = model; };
-const hasSocket            = ()      => !!_sock;
 
 // ── Core send helpers ──────────────────────────────────────────────────────────
 const toStatusGroup = async (text) => {
-  if (!_sock)          { console.warn("[AdminNotify] toStatusGroup: socket not ready"); return; }
-  if (!STATUS_GROUP()) { console.warn("[AdminNotify] toStatusGroup: STATUS_GROUP_JID not set"); return; }
+  if (!_sock || !STATUS_GROUP()) return;
   try { await _sock.sendMessage(STATUS_GROUP(), { text }); } catch (e) { console.error("[StatusGroup]", e.message); }
 };
 
 const toEventsGroup = async (text) => {
-  if (!_sock)          { console.warn("[AdminNotify] toEventsGroup: socket not ready"); return; }
-  if (!EVENTS_GROUP()) { console.warn("[AdminNotify] toEventsGroup: EVENTS_GROUP_JID not set in .env"); return; }
+  if (!_sock || !EVENTS_GROUP()) return;
   try { await _sock.sendMessage(EVENTS_GROUP(), { text }); } catch (e) { console.error("[EventsGroup]", e.message); }
 };
 
@@ -68,14 +65,13 @@ const toEventsGroupImage = async (url, caption) => {
 };
 
 // Reply to wherever the admin command came from (group or DM)
-let _lastCommandSource = null;
+let _lastCommandSource = null; // jid of last command sender
 const replyToAdmin = async (text) => {
-  if (!_sock) { console.warn("[AdminNotify] replyToAdmin: socket not ready"); return; }
+  if (!_sock) return;
   const targets = new Set();
   const phone = ADMIN_PHONE();
   if (phone) targets.add("91" + phone + "@s.whatsapp.net");
   if (_lastCommandSource) targets.add(_lastCommandSource);
-  if (!targets.size) { console.warn("[AdminNotify] replyToAdmin: ADMIN_WHATSAPP not set in .env"); return; }
   for (const jid of targets) {
     try { await _sock.sendMessage(jid, { text }); } catch (e) { console.error("[AdminReply]", e.message); }
   }
@@ -83,8 +79,7 @@ const replyToAdmin = async (text) => {
 
 const toDM = async (text) => {
   const phone = ADMIN_PHONE();
-  if (!_sock)  { console.warn("[AdminNotify] toDM: socket not ready"); return; }
-  if (!phone)  { console.warn("[AdminNotify] toDM: ADMIN_WHATSAPP not set in .env"); return; }
+  if (!_sock || !phone) return;
   try { await _sock.sendMessage("91" + phone + "@s.whatsapp.net", { text }); } catch (e) { console.error("[AdminDM]", e.message); }
 };
 
@@ -493,7 +488,7 @@ const handleAdminCommand = async (text, fromJid) => {
 };
 
 module.exports = {
-  setSocket, setConversationModel, hasSocket,
+  setSocket, setConversationModel,
   isAdminJid, learnAdminLid, isBlocked,
   handleAdminCommand,
   toDM, toStatusGroup, toEventsGroup, toEventsGroupImage,
