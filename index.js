@@ -221,10 +221,10 @@ const startBot = async () => {
           inner.ephemeralMessage?.message?.imageMessage ||
           inner.viewOnceMessage?.message?.imageMessage);
 
-        // ptt = push-to-talk = voice note recorded in WhatsApp
-        // We check ptt:true OR seconds>0 to cover all Baileys versions
-        const audioMsg = inner.audioMessage || inner.ephemeralMessage?.message?.audioMessage;
-        const hasAudio = !!(audioMsg && (audioMsg.ptt === true || (audioMsg.seconds || 0) > 0));
+        const hasAudio = !!(
+          (inner.audioMessage && inner.audioMessage.pttDuration > 0) ||
+          inner.ephemeralMessage?.message?.audioMessage
+        );
 
         const pushName = msg.pushName || "";
 
@@ -283,7 +283,7 @@ const startBot = async () => {
             continue;
           }
           const evGrp = process.env.EVENTS_GROUP_JID || "";
-          if (evGrp && admin._sock) {
+          if (evGrp && admin.hasSocket()) {
             try { await sock.sendMessage(evGrp, { forward: msg, force: true }); }
             catch (_) { await admin.toEventsGroup("📸 PAYMENT SCREENSHOT from " + phone + "\n(Check customer chat)"); }
           }
@@ -307,6 +307,7 @@ const startBot = async () => {
         }
 
         // ── VOICE NOTE ─────────────────────────────────────────────────────────
+        // Only fire for actual voice/audio messages (pttDuration > 0 = recorded voice note)
         if (hasAudio) {
           const voiceProcessor = require('./bot/voiceProcessor');
           if (voiceProcessor.isAvailable()) {
@@ -317,11 +318,10 @@ const startBot = async () => {
               try { await sock.sendMessage(jid, { text: "Aapne bola: \"" + transcribed + "\"\n\nProcess kar raha hoon 🌿" }); } catch (_) {}
               handleMessage(sock, jid, transcribed, pushName).catch(() => {});
             } else {
-              try { await sock.sendMessage(jid, { text: "Voice clearly nahi sun paya 🙏 Apna order ya sawaal text mein likh kar bhejein — jaldi reply milegi!" }); } catch (_) {}
+              try { await sock.sendMessage(jid, { text: "Voice note clearly sun nahi aaya 🙏 Text mein bhejein ya call karein: 6201276506" }); } catch (_) {}
             }
           } else {
-            // Voice transcription not set up — ask them to type
-            try { await sock.sendMessage(jid, { text: "Voice note mila ✅ Lekin abhi voice samajhna mushkil hai 🙏\n\nApna order ya sawaal text mein likh kar bhejein — bahut jaldi reply milegi!\n\nExample: \"1 plate lunch aaj chahiye\" ya \"monthly plan lena hai\" 🌿" }); } catch (_) {}
+            try { await sock.sendMessage(jid, { text: "Voice notes abhi supported nahi hain 🌿 Apna message text mein bhejein." }); } catch (_) {}
           }
           continue;
         }
