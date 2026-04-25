@@ -139,6 +139,8 @@ const CONFUSED_REPLY = "Samajh nahi aaya 🌿\n\nYeh try karein:\n\n1. Order kar
 // Matches: hi, hii, hiii, hello, hey, namaste, helo, start, menu, help, salam, assalam
 // with any trailing punctuation/spaces
 const GREET_REGEX  = /^(hi+|hello+|hey+|namaste|helo|start|menu|help|salam|assalam)[\s!?.]*$/i;
+// Matches when customer says they sent a payment screenshot (text-based)
+const SCREENSHOT_REGEX = /\b(screenshot|payment (bhej|kar|send|ho gaya|done|kiya)|bhej (diya|deta|deti)|send (kar|kiya|diya)|paid|upi (kar|kiya)|paytm|phonepay|gpay|payment confirm|payment ho gaya)\b/i;
 const ORDERS_REGEX = /\b(order|orders|mera order|mere orders|see order|check order|order history|order dekhein|order dikhao|order status)\b/i;
 const LOGO_REGEX   = /\.(jpg|jpeg|png|webp|gif)(\?|$)/i;
 
@@ -198,14 +200,57 @@ const handleMessage = async (sock, rawJid, userText, pushName = "") => {
 
     // ── Main menu shortcut (1-4) — only when main menu is active ─────────────
     // Checks last bot message to avoid hijacking sub-menu number inputs.
-    const lastBotMsg     = [...history].reverse().find(m => m.role === "assistant")?.content || "";
+    const lastBotMsg       = [...history].reverse().find(m => m.role === "assistant")?.content || "";
     const isMainMenuActive = lastBotMsg.includes("1. Order karein") && lastBotMsg.includes("2. Subscription");
+    const isAccountMenu    = lastBotMsg.includes("1. Mere orders dekhein") && lastBotMsg.includes("2. Account info");
 
     if (!awaiting && isMainMenuActive && MENU_L2[trimmed]) {
       const reply = MENU_L2[trimmed];
       await ctx.appendExchange(phoneNumber, userText, reply);
       await sock.sendMessage(rawJid, { text: reply });
       return;
+    }
+
+    // ── Account sub-menu shortcuts — resolve without AI to prevent stalls ─────
+    if (!awaiting && isAccountMenu) {
+      if (trimmed === "1") {
+        // "Mere orders dekhein" — fetch directly, no AI involvement
+        try { await sock.sendPresenceUpdate("composing", rawJid); } catch (_) {}
+        const accountData = await fetchAccountData(phoneNumber);
+        try { await sock.sendPresenceUpdate("available", rawJid); } catch (_) {}
+        const reply = formatOrdersReply(accountData || { orders: [], totalOrders: 0, coins: 0 }, profile);
+        await ctx.appendExchange(phoneNumber, userText, reply);
+        await sock.sendMessage(rawJid, { text: reply });
+        return;
+      }
+      if (trimmed === "2") {
+        // "Account info" — show from local profile
+        const coins = profile.coins || 0;
+        const reply =
+          "👤 Account Info
+
+" +
+          "Name: " + (profile.name || "Not set") + "
+" +
+          "Phone: " + phoneNumber + "
+" +
+          "Address: " + (profile.address || "Not set") + "
+" +
+          "Last Plan: " + (profile.lastPlanSeen || "None") + "
+" +
+          "Meal Preference: " + (profile.mealPreference || "Standard") + "
+" +
+          "Loyalty Coins: " + coins + "
+
+" +
+          "1. Mere orders dekhein
+3. Address update karein
+4. Meal preference update
+5. Back";
+        await ctx.appendExchange(phoneNumber, userText, reply);
+        await sock.sendMessage(rawJid, { text: reply });
+        return;
+      }
     }
 
     // ── Orders request ───────────────────────────────────────────────────────
@@ -216,6 +261,25 @@ const handleMessage = async (sock, rawJid, userText, pushName = "") => {
       const reply = formatOrdersReply(accountData || { orders: [], totalOrders: 0, coins: 0 }, profile);
       await ctx.appendExchange(phoneNumber, userText, reply);
       await sock.sendMessage(rawJid, { text: reply });
+      return;
+    }
+
+    // ── Payment screenshot / payment done (text) ─────────────────────────────
+    // Guarantee admin + group notification even if AI skips the CONFIRM_PAYMENT block.
+    if (!awaiting && SCREENSHOT_REGEX.test(userText)) {
+      const screenshotReply = "Aapka payment screenshot hamare team ko mil gaya \u2705 2-4 ghante mein verify karke activate kar denge. Urgent ho to call karein: 6201276506";
+      await ctx.appendExchange(phoneNumber, userText, screenshotReply);
+      await sock.sendMessage(rawJid, { text: screenshotReply });
+      // Always notify group and admin DM — this is the guaranteed path
+      const pName = profile.name || "Unknown";
+      await admin.toEventsGroup(
+        "\uD83D\uDCB0 PAYMENT RECEIVED (text)\n\n\uD83D\uDC64 " + pName + "\n\uD83D\uDCF1 " + phoneNumber +
+        "\nMsg: " + userText.slice(0, 100) +
+        "\n\nVerify & activate: !send " + phoneNumber + " Payment confirm ho gaya \u2705 Kal se delivery shuru ho jaayegi."
+      );
+      await admin.toDM(
+        "\uD83D\uDCB0 PAYMENT TEXT from " + pName + " (" + phoneNumber + ")\n\n\"" + userText.slice(0, 150) + "\"\n\nTo confirm:\n!send " + phoneNumber + " Aapka payment confirm ho gaya \u2705 Kal se delivery shuru."
+      );
       return;
     }
 
@@ -252,7 +316,7 @@ const handleMessage = async (sock, rawJid, userText, pushName = "") => {
     }
 
     try { await sock.sendPresenceUpdate("available", rawJid); } catch (_) {}
-    const cleanedReply = cleanReply(aiReply);
+    const cleanedReply = cleanReply(aiReply); // Always computed AFTER possible second AI call
     await ctx.appendExchange(phoneNumber, userText, cleanedReply);
 
     // ── Action blocks ──────────────────────────────────────────────────────────
