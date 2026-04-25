@@ -227,26 +227,14 @@ const handleMessage = async (sock, rawJid, userText, pushName = "") => {
         // "Account info" — show from local profile
         const coins = profile.coins || 0;
         const reply =
-          "👤 Account Info
-
-" +
-          "Name: " + (profile.name || "Not set") + "
-" +
-          "Phone: " + phoneNumber + "
-" +
-          "Address: " + (profile.address || "Not set") + "
-" +
-          "Last Plan: " + (profile.lastPlanSeen || "None") + "
-" +
-          "Meal Preference: " + (profile.mealPreference || "Standard") + "
-" +
-          "Loyalty Coins: " + coins + "
-
-" +
-          "1. Mere orders dekhein
-3. Address update karein
-4. Meal preference update
-5. Back";
+          "\u{1F464} Account Info\n\n" +
+          "Name: " + (profile.name || "Not set") + "\n" +
+          "Phone: " + phoneNumber + "\n" +
+          "Address: " + (profile.address || "Not set") + "\n" +
+          "Last Plan: " + (profile.lastPlanSeen || "None") + "\n" +
+          "Meal Preference: " + (profile.mealPreference || "Standard") + "\n" +
+          "Loyalty Coins: " + coins + "\n\n" +
+          "1. Mere orders dekhein\n3. Address update karein\n4. Meal preference update\n5. Back";
         await ctx.appendExchange(phoneNumber, userText, reply);
         await sock.sendMessage(rawJid, { text: reply });
         return;
