@@ -46,6 +46,7 @@ const TG_TOKEN     = () => process.env.TELEGRAM_BOT_TOKEN || "";
 const TG_CHAT      = () => process.env.TELEGRAM_CHAT_ID   || "";
 
 const setSocket            = (sock)  => { _sock = sock; };
+const hasSocket            = ()      => !!_sock;
 const setConversationModel = (model) => { _Conversation = model; };
 
 // ── Core send helpers ──────────────────────────────────────────────────────────
@@ -488,7 +489,7 @@ const handleAdminCommand = async (text, fromJid) => {
 };
 
 module.exports = {
-  setSocket, setConversationModel,
+  setSocket, setConversationModel, hasSocket,
   isAdminJid, learnAdminLid, isBlocked,
   handleAdminCommand,
   toDM, toStatusGroup, toEventsGroup, toEventsGroupImage,
