@@ -29,6 +29,13 @@ const isAlreadyProcessing = (phone) => {
 };
 const markProcessingStart = (phone) => _busy.set(phone, Date.now());
 const markProcessingDone  = (phone) => _busy.delete(phone);
+const clearAllLocks = () => {
+  const count = _busy.size;
+  _busy.clear();
+  _queues.clear();
+  _lastProcessed.clear();
+  if (count > 0) console.log("[CTX] Cleared " + count + " stale lock(s) on reconnect.");
+};
 
 // ── Per-phone message queue ───────────────────────────────────────────────────
 const _queues = new Map(); // phone -> [{ sock, rawJid, userText, pushName }]
@@ -181,7 +188,7 @@ const getAllPhones = async () => {
 
 module.exports = {
   normalizePhone,
-  isAlreadyProcessing, markProcessingStart, markProcessingDone,
+  isAlreadyProcessing, markProcessingStart, markProcessingDone, clearAllLocks,
   enqueue, dequeue, hasQueued,
   wasJustProcessed, markJustProcessed,
   getHistoryAndProfile, appendExchange, updateProfile,
