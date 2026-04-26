@@ -82,20 +82,32 @@ const buildWelcome = (profile) => {
   const fname = profile.name ? profile.name.split(" ")[0] : null;
   const gname = fname ? fname + " ji" : null;
   const greet = "Namaste" + (gname ? ", " + gname : "") + "!";
+  const menu = "1. Order karein\n2. Subscription\n3. Account & orders\n4. Support\n\nNumber bhejein ya seedha poochiye 🌿";
   if (isRet) {
     return greet + " Wapas aaye — swagat hai 🌿\n\n" +
       (profile.lastOrderItems ? "Last order: " + profile.lastOrderItems + "\n\n" : "") +
-      "Kya karna hai:\n\n1. Order karein\n2. Subscription\n3. Account & orders\n4. Support\n\nNumber bhejein ya seedha poochiye 🌿";
+      "Kya karna hai:\n\n" + menu;
   }
-  return greet + " SatvikMeals mein swagat hai 🌿\n\nPatna ka trusted pure vegetarian meal service.\nGhar jaisa khana, fresh daily delivery.\n\nKya karna hai:\n\n1. Order karein\n2. Subscription\n3. Account & orders\n4. Support\n\nNumber bhejein ya seedha poochiye 🌿";
+  return greet + " SatvikMeals mein swagat hai 🌿\n\nPatna ka trusted pure vegetarian meal service.\nGhar jaisa khana, fresh daily delivery.\n\nKya karna hai:\n\n" + menu;
 };
 
-// ── Level-2 menus ──────────────────────────────────────────────────────────────
+// ── Level-2 menus (must match systemPrompt sub-menu texts) ────────────────────
 const MENU_L2 = {
   "1": "Order options:\n\n1. Aaj ka menu dekhein\n2. Daily tiffin order (Rs.80/plate)\n3. Custom order\n4. Back",
   "2": "Subscription options:\n\n1. Monthly plan lein\n2. Delivery check karein\n3. Plan pause/resume/cancel\n4. Plan change\n5. Back",
   "3": "Account options:\n\n1. Mere orders dekhein\n2. Account info\n3. Address update karein\n4. Meal preference update\n5. Back",
   "4": "Support options:\n\n1. Complaint ya feedback\n2. Callback request\n3. Offers aur coins\n4. Owner se baat karein\n5. Back",
+};
+
+// ── Detect which sub-menu context the last bot message was in ─────────────────
+const detectMenuContext = (lastBotMsg) => {
+  if (!lastBotMsg) return "none";
+  if (lastBotMsg.includes("1. Order karein") && lastBotMsg.includes("2. Subscription")) return "main";
+  if (lastBotMsg.includes("1. Aaj ka menu") && lastBotMsg.includes("2. Daily tiffin order")) return "order";
+  if (lastBotMsg.includes("1. Monthly plan") && lastBotMsg.includes("2. Delivery check")) return "subscription";
+  if (lastBotMsg.includes("1. Mere orders") && lastBotMsg.includes("2. Account info")) return "account";
+  if (lastBotMsg.includes("1. Complaint ya feedback") && lastBotMsg.includes("2. Callback")) return "support";
+  return "none";
 };
 
 // ── Check if last bot message was asking for confirmation ─────────────────────
@@ -137,12 +149,18 @@ const buildInstantMap = (profile) => {
 const CONFUSED_REPLY = "Samajh nahi aaya 🌿\n\nYeh try karein:\n\n1. Order karein\n2. Subscription\n3. Account & orders\n4. Support\n\nYa seedha call karein: 6201276506";
 
 // Matches: hi, hii, hiii, hello, hey, namaste, helo, start, menu, help, salam, assalam
-// with any trailing punctuation/spaces
 const GREET_REGEX  = /^(hi+|hello+|hey+|namaste|helo|start|menu|help|salam|assalam)[\s!?.]*$/i;
-// Matches when customer says they sent a payment screenshot (text-based)
+
+// Matches payment screenshot text references
 const SCREENSHOT_REGEX = /\b(screenshot|payment (bhej|kar|send|ho gaya|done|kiya)|bhej (diya|deta|deti)|send (kar|kiya|diya)|paid|upi (kar|kiya)|paytm|phonepay|gpay|payment confirm|payment ho gaya)\b/i;
+
+// Matches order history requests
 const ORDERS_REGEX = /\b(order|orders|mera order|mere orders|see order|check order|order history|order dekhein|order dikhao|order status)\b/i;
-const LOGO_REGEX   = /\.(jpg|jpeg|png|webp|gif)(\?|$)/i;
+
+// Matches intent to order tiffin
+const ORDER_INTENT_REGEX = /\b(tiffin|khana|meal|food|plate|lunch|dinner|order karna|order chahiye|order lena|i want tiffin|tiffin chahiye|khana chahiye)\b/i;
+
+const LOGO_REGEX = /\.(jpg|jpeg|png|webp|gif)(\?|$)/i;
 
 // ── Main handler ───────────────────────────────────────────────────────────────
 const handleMessage = async (sock, rawJid, userText, pushName = "") => {
@@ -154,14 +172,13 @@ const handleMessage = async (sock, rawJid, userText, pushName = "") => {
     return;
   }
 
-  // ── Dedup: drop if this exact text was just successfully processed ────────
-  // Catches duplicates that entered the queue before index.js dedup could block them.
+  // ── Dedup ─────────────────────────────────────────────────────────────────
   if (ctx.wasJustProcessed(phoneNumber, userText)) {
     console.warn("[DEDUP] Recently processed, dropping: " + phoneNumber + " — " + userText.slice(0,30));
     return;
   }
 
-  // ── Lock: queue if currently processing this phone ────────────────────────
+  // ── Lock: queue if currently processing ───────────────────────────────────
   if (ctx.isAlreadyProcessing(phoneNumber)) {
     ctx.enqueue(phoneNumber, { sock, rawJid, userText, pushName });
     console.log("[QUEUED] " + phoneNumber + ": " + userText.slice(0, 40));
@@ -198,23 +215,22 @@ const handleMessage = async (sock, rawJid, userText, pushName = "") => {
     const trimmed  = userText.trim();
     const awaiting = isAwaitingConfirmation(history);
 
-    // ── Main menu shortcut (1-4) — only when main menu is active ─────────────
-    // Checks last bot message to avoid hijacking sub-menu number inputs.
-    const lastBotMsg       = [...history].reverse().find(m => m.role === "assistant")?.content || "";
-    const isMainMenuActive = lastBotMsg.includes("1. Order karein") && lastBotMsg.includes("2. Subscription");
-    const isAccountMenu    = lastBotMsg.includes("1. Mere orders dekhein") && lastBotMsg.includes("2. Account info");
+    // ── Detect current menu context from last bot message ─────────────────────
+    const lastBotMsg    = [...history].reverse().find(m => m.role === "assistant")?.content || "";
+    const menuContext   = detectMenuContext(lastBotMsg);
 
-    if (!awaiting && isMainMenuActive && MENU_L2[trimmed]) {
+    // ── MAIN MENU number routing — only when main menu was last shown ─────────
+    if (!awaiting && menuContext === "main" && MENU_L2[trimmed]) {
       const reply = MENU_L2[trimmed];
       await ctx.appendExchange(phoneNumber, userText, reply);
       await sock.sendMessage(rawJid, { text: reply });
       return;
     }
 
-    // ── Account sub-menu shortcuts — resolve without AI to prevent stalls ─────
-    if (!awaiting && isAccountMenu) {
+    // ── ACCOUNT sub-menu number routing — direct, no AI needed ───────────────
+    if (!awaiting && menuContext === "account") {
       if (trimmed === "1") {
-        // "Mere orders dekhein" — fetch directly, no AI involvement
+        // Mere orders dekhein — fetch directly
         try { await sock.sendPresenceUpdate("composing", rawJid); } catch (_) {}
         const accountData = await fetchAccountData(phoneNumber);
         try { await sock.sendPresenceUpdate("available", rawJid); } catch (_) {}
@@ -224,7 +240,7 @@ const handleMessage = async (sock, rawJid, userText, pushName = "") => {
         return;
       }
       if (trimmed === "2") {
-        // "Account info" — show from local profile
+        // Account info — from local profile
         const coins = profile.coins || 0;
         const reply =
           "\u{1F464} Account Info\n\n" +
@@ -239,9 +255,40 @@ const handleMessage = async (sock, rawJid, userText, pushName = "") => {
         await sock.sendMessage(rawJid, { text: reply });
         return;
       }
+      if (trimmed === "5") {
+        // Back to main menu
+        const reply = buildWelcome(profile);
+        await ctx.appendExchange(phoneNumber, userText, reply);
+        await sock.sendMessage(rawJid, { text: reply });
+        return;
+      }
     }
 
-    // ── Orders request ───────────────────────────────────────────────────────
+    // ── SUPPORT sub-menu: option 4 = transfer to owner (instant) ─────────────
+    if (!awaiting && menuContext === "support" && trimmed === "4") {
+      const reason = "Customer requested to speak with owner.";
+      await ctx.updateProfile(phoneNumber, { isTransferred: true });
+      const reply = "Main owner ko notify kar raha hoon 🙏 Woh jald aapse sampark karenge.";
+      await ctx.appendExchange(phoneNumber, userText, reply);
+      await sock.sendMessage(rawJid, { text: reply });
+      await admin.toDM("🔴 CUSTOMER WANTS TO TALK\n\n👤 " + (profile.name||"Unknown") + " — " + phoneNumber + "\nReason: " + reason + "\n\nReply: !send " + phoneNumber + " Namaste!\nWhen done: !unfreeze " + phoneNumber);
+      await admin.toEventsGroup("🔴 TRANSFER TO OWNER\n\n👤 " + (profile.name||"Unknown") + " — " + phoneNumber);
+      return;
+    }
+
+    // ── Back to main menu from any sub-menu ───────────────────────────────────
+    if (!awaiting && ["order","subscription","account","support"].includes(menuContext)) {
+      const isBackOption = trimmed === "4" && menuContext === "order" ||
+                           trimmed === "5" && ["subscription","account","support"].includes(menuContext);
+      if (isBackOption) {
+        const reply = buildWelcome(profile);
+        await ctx.appendExchange(phoneNumber, userText, reply);
+        await sock.sendMessage(rawJid, { text: reply });
+        return;
+      }
+    }
+
+    // ── Orders request (natural language) ────────────────────────────────────
     if (!awaiting && ORDERS_REGEX.test(userText)) {
       try { await sock.sendPresenceUpdate("composing", rawJid); } catch (_) {}
       const accountData = await fetchAccountData(phoneNumber);
@@ -253,12 +300,10 @@ const handleMessage = async (sock, rawJid, userText, pushName = "") => {
     }
 
     // ── Payment screenshot / payment done (text) ─────────────────────────────
-    // Guarantee admin + group notification even if AI skips the CONFIRM_PAYMENT block.
     if (!awaiting && SCREENSHOT_REGEX.test(userText)) {
       const screenshotReply = "Aapka payment screenshot hamare team ko mil gaya \u2705 2-4 ghante mein verify karke activate kar denge. Urgent ho to call karein: 6201276506";
       await ctx.appendExchange(phoneNumber, userText, screenshotReply);
       await sock.sendMessage(rawJid, { text: screenshotReply });
-      // Always notify group and admin DM — this is the guaranteed path
       const pName = profile.name || "Unknown";
       await admin.toEventsGroup(
         "\uD83D\uDCB0 PAYMENT RECEIVED (text)\n\n\uD83D\uDC64 " + pName + "\n\uD83D\uDCF1 " + phoneNumber +
@@ -283,12 +328,19 @@ const handleMessage = async (sock, rawJid, userText, pushName = "") => {
       }
     }
 
+    // ── Order intent (natural language, before going to AI) ──────────────────
+    // If user says "I want tiffin" or similar with no history context, jump to order flow via AI
+    // Mark context so AI knows what to do
+    const extraContext = ORDER_INTENT_REGEX.test(userText) && menuContext === "none"
+      ? "\n[CONTEXT: Customer is expressing order intent directly. Start the DAILY TIFFIN ORDER FLOW immediately.]"
+      : "";
+
     // ── AI call ───────────────────────────────────────────────────────────────
     try { await sock.sendPresenceUpdate("composing", rawJid); } catch (_) {}
 
     let aiReply;
     try {
-      aiReply = await chat(userText, history, profile, null, isNewUser);
+      aiReply = await chat(userText + extraContext, history, profile, null, isNewUser);
     } catch (aiErr) {
       console.error("[AI ERR]", phoneNumber, aiErr.message);
       try { await sock.sendPresenceUpdate("available", rawJid); } catch (_) {}
@@ -297,14 +349,24 @@ const handleMessage = async (sock, rawJid, userText, pushName = "") => {
       return;
     }
 
-    // Second AI call if account data is needed
+    // ── Second AI call ONLY if account data is needed AND not already fetched ──
     if (hasBlock(aiReply, "FETCH_ACCOUNT")) {
       const accountData = await fetchAccountData(phoneNumber);
-      try { aiReply = await chat(userText, history, profile, accountData, isNewUser); } catch (_) {}
+      if (accountData) {
+        try {
+          aiReply = await chat(userText + extraContext, history, profile, accountData, isNewUser);
+        } catch (_) {
+          // If second AI call fails, fall back to formatting orders directly
+          aiReply = aiReply.replace(/\[FETCH_ACCOUNT\][\s\S]*?\[\/FETCH_ACCOUNT\]/g, "");
+          const formatted = formatOrdersReply(accountData, profile);
+          // Replace AI reply with direct formatted reply — avoids second message
+          aiReply = formatted;
+        }
+      }
     }
 
     try { await sock.sendPresenceUpdate("available", rawJid); } catch (_) {}
-    const cleanedReply = cleanReply(aiReply); // Always computed AFTER possible second AI call
+    const cleanedReply = cleanReply(aiReply);
     await ctx.appendExchange(phoneNumber, userText, cleanedReply);
 
     // ── Action blocks ──────────────────────────────────────────────────────────
@@ -488,12 +550,8 @@ const handleMessage = async (sock, rawJid, userText, pushName = "") => {
     try { await sock.sendPresenceUpdate("available", rawJid); } catch (_) {}
     try { await sock.sendMessage(rawJid, { text: "Kuch technical issue aa gaya hai 🙏 Thodi der mein try karein ya call karein: 6201276506" }); } catch (_) {}
   } finally {
-    // Always mark done and release the lock, even if an error occurred.
-    // Mark text as processed BEFORE releasing lock so any queued duplicate
-    // that runs next sees it was just handled and drops silently.
     ctx.markJustProcessed(phoneNumber, userText);
     ctx.markProcessingDone(phoneNumber);
-    // Process next queued message for this phone, if any
     if (ctx.hasQueued(phoneNumber)) {
       const next = ctx.dequeue(phoneNumber);
       if (next) setImmediate(() => handleMessage(next.sock, next.rawJid, next.userText, next.pushName).catch(e => console.error("[QUEUE_ERR]", e.message)));
