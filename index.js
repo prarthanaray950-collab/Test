@@ -106,8 +106,9 @@ process.on("unhandledRejection", (r) => console.error("[UnhandledRejection]", r)
 process.on("uncaughtException",  (e) => console.error("[UncaughtException]", e.message));
 
 // ── Bot state ──────────────────────────────────────────────────────────────────
-let isConnecting = false;
-let activeSock   = null;
+let isConnecting  = false;
+let activeSock    = null;
+let botConnectedAt = 0; // timestamp (ms) when bot last successfully connected
 
 // ── Message deduplication ─────────────────────────────────────────────────────
 // Layer 1: exact message-ID dedup — catches WA re-deliveries with same ID
@@ -172,6 +173,7 @@ const startBot = async () => {
       }
       if (connection === "open") {
         botStatus = "ready"; currentQR = null; isConnecting = false;
+        botConnectedAt = Date.now();
         console.log("[Baileys] ✅ Connected to WhatsApp!");
         admin.setSocket(sock);
         scheduler.setSocket(sock);
@@ -190,11 +192,27 @@ const startBot = async () => {
         if (!jid || jid === "status@broadcast") continue;
 
         // ── REPLAY GUARD ───────────────────────────────────────────────────────
-        // On reconnect, Baileys replays recent messages from WA servers.
-        // Drop any message older than 30 seconds to ignore replays.
+        // Baileys replays messages from WA servers on reconnect.
+        //
+        // Problem with a fixed window (e.g. 30s): when the bot is idle/sleeping,
+        // WA takes 5-30s to wake it up. By the time the message event fires, the
+        // message timestamp is already "old" and gets dropped — causing the first
+        // 1-2 messages after any idle period to be silently ignored.
+        //
+        // Fix: only drop messages that were sent BEFORE this bot session connected.
+        // Messages sent after botConnectedAt are always real, even if they look old.
+        // For true replays (sent long before connect), we still drop them.
         const msgTs = (msg.messageTimestamp || 0) * 1000; // WA timestamps are in seconds
-        if (msgTs && Date.now() - msgTs > 30000) {
-          console.warn("[SKIP] Old message (replay?): " + new Date(msgTs).toISOString() + " | " + jid);
+        if (msgTs && botConnectedAt > 0) {
+          const sentBeforeConnect = msgTs < botConnectedAt - 5000; // 5s buffer for clock skew
+          const tooOld = Date.now() - msgTs > 300000; // >5 minutes old = definitely a replay
+          if (sentBeforeConnect && tooOld) {
+            console.warn("[SKIP] Old replay message: " + new Date(msgTs).toISOString() + " | " + jid);
+            continue;
+          }
+        } else if (msgTs && Date.now() - msgTs > 300000) {
+          // Fallback if botConnectedAt not set yet: only drop messages >5 min old
+          console.warn("[SKIP] Very old message (>5min): " + new Date(msgTs).toISOString() + " | " + jid);
           continue;
         }
 
