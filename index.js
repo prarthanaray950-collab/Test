@@ -174,6 +174,7 @@ const startBot = async () => {
       if (connection === "open") {
         botStatus = "ready"; currentQR = null; isConnecting = false;
         botConnectedAt = Date.now();
+        ctx.clearAllLocks(); // clear stale processing locks from previous session
         console.log("[Baileys] ✅ Connected to WhatsApp!");
         admin.setSocket(sock);
         scheduler.setSocket(sock);
@@ -192,28 +193,24 @@ const startBot = async () => {
         if (!jid || jid === "status@broadcast") continue;
 
         // ── REPLAY GUARD ───────────────────────────────────────────────────────
-        // Baileys replays messages from WA servers on reconnect.
+        // Baileys replays old messages from WA servers on every reconnect.
+        // We must drop genuine replays but NEVER drop messages sent while the
+        // bot was in the process of reconnecting (e.g. after 20min idle).
         //
-        // Problem with a fixed window (e.g. 30s): when the bot is idle/sleeping,
-        // WA takes 5-30s to wake it up. By the time the message event fires, the
-        // message timestamp is already "old" and gets dropped — causing the first
-        // 1-2 messages after any idle period to be silently ignored.
+        // Rule: drop ONLY if BOTH conditions are true:
+        //   1. Message was sent more than 10 minutes ago (not a wake-up delay)
+        //   2. Message timestamp is before this session's connect time (true replay)
         //
-        // Fix: only drop messages that were sent BEFORE this bot session connected.
-        // Messages sent after botConnectedAt are always real, even if they look old.
-        // For true replays (sent long before connect), we still drop them.
-        const msgTs = (msg.messageTimestamp || 0) * 1000; // WA timestamps are in seconds
-        if (msgTs && botConnectedAt > 0) {
-          const sentBeforeConnect = msgTs < botConnectedAt - 5000; // 5s buffer for clock skew
-          const tooOld = Date.now() - msgTs > 300000; // >5 minutes old = definitely a replay
-          if (sentBeforeConnect && tooOld) {
-            console.warn("[SKIP] Old replay message: " + new Date(msgTs).toISOString() + " | " + jid);
+        // This means messages sent while bot was sleeping/reconnecting always go through.
+        const msgTs = (msg.messageTimestamp || 0) * 1000;
+        if (msgTs) {
+          const ageMs = Date.now() - msgTs;
+          const olderThan10Min = ageMs > 10 * 60 * 1000;
+          const sentBeforeThisSession = botConnectedAt > 0 && msgTs < (botConnectedAt - 10000);
+          if (olderThan10Min && sentBeforeThisSession) {
+            console.warn("[SKIP] Replay (old + pre-session): " + new Date(msgTs).toISOString() + " | " + jid);
             continue;
           }
-        } else if (msgTs && Date.now() - msgTs > 300000) {
-          // Fallback if botConnectedAt not set yet: only drop messages >5 min old
-          console.warn("[SKIP] Very old message (>5min): " + new Date(msgTs).toISOString() + " | " + jid);
-          continue;
         }
 
         // Extract text from ALL possible message wrapper types
