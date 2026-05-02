@@ -13,6 +13,7 @@ const { handleMessage }     = require("./bot/messageHandler");
 const admin                 = require("./bot/adminNotifier");
 const scheduler             = require("./bot/scheduler");
 const Conversation          = require("./db/models/Conversation");
+const ctx                   = require("./bot/contextManager");
 
 const express = require("express");
 const qrcode  = require("qrcode");
@@ -360,4 +361,3 @@ const startBot = async () => {
 };
 
 startBot();
-QQ
